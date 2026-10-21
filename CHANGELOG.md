@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- On the desktop app the gate strip no longer runs past its panel and off the screen. Graphical surfaces (desktop, VS Code, mobile) can draw a mark wider than a cell (■ measured about 1.4 cells on the desktop app), so there rows of marks (the gate strip, the inline summary's strip, the other-loops dots) hold fewer marks and still end on the newest. Should a surface draw them wider still, every row of marks, the architect timeline included, is cut at its box. A terminal draws them as before.
+- On those surfaces the legend keeps one row of air above the panels, whose borders touched it on the desktop app; the log's row budget counts that row.
+
 ## 0.4.0
 
 - The main box shows the time left until each rate-limit window resets (`5h ▰▱▱▱▱ 19% ↻3h10m`), from the `resetsAt` the session already reports. Below 56 columns the gauges stay as they were. ([#3](https://github.com/scasella/claude-flightdeck/pull/3), thanks @vihrea1337)

@@ -18,6 +18,7 @@ import {
   limitLabel,
   limitOf,
   logRows,
+  marksIn,
   momentOf,
   normalizeCard,
   normalizeGate,
@@ -163,6 +164,7 @@ test('layout math: lanes share one axis, the log gets 4-8 rows, the legend never
   expect((b?.before ?? 0) + (b?.bar ?? 0) + (b?.after ?? 0)).toBe(20)
   expect([logRows(10, 40), logRows(50, 40), logRows(200, 40)]).toEqual([4, 7, 8])
   expect(fitLegend([{ label: 'main' }, { label: 'agents' }, { label: 'architect' }], 20).map(x => x.label)).toEqual(['main', 'agents'])
+  expect([marksIn(64, true), marksIn(64, false), marksIn(6, false)]).toEqual([64, 42, 4])
   expect(limitLabel('five_hour')).toBe('5h')
   expect(prettyModel('claude-opus-5-5[1m]')).toBe('Opus 5.5 1M')
   expect(prettyModel('us.anthropic.claude-sonnet-4-5-20250929-v1:0')).toBe('Sonnet 4.5')
@@ -492,6 +494,60 @@ test("the main box shows the last request's time to first token and decode speed
   for (const cols of [40, 64, 120]) {
     const ui = await $.ui.mount({ ...pane(cols), surface: 'terminal' })
     expect(await ui.find({ text: /ttft 0\.8s · 60 tok\/s/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('on a graphical surface, rows of marks hold fewer marks, keep the newest and clip at their box', async ($, on) => {
+  engine(on)
+  // The newest check is the one refused: its ✗ must stay in sight.
+  on('tool.check', (_$, e) => ({ decision: e.tool_use_id === 'g29' ? 'deny' : 'allow' }))
+  const usage = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'claude-opus-5-5' }
+  on('turn.step', async function* () {
+    return { turnId: 'G1', index: 0, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage }
+  })
+  for (let i = 0; i < 30; i += 1) await $.tool.check({ tool: 'Read', input: { file_path: `/f${i}.ts` }, tool_use_id: `g${i}` })
+  // A loop that is no card and no architect: a dot on the "other loops" row.
+  const s = $.turn.step({ turnId: 'G1', index: 0, model: 'claude-opus-5-5', messageCount: 1, agentId: 'wf1' })
+  for await (const _ of s) void _
+  await s.result
+  await $.session
+    .append({
+      message: { type: 'assistant', role: 'assistant', content: [{ type: 'server_tool_use', id: 'srvG', name: 'advisor', input: {} }] as never },
+      door: 'response',
+      origin: { kind: 'model', model: 'claude-opus-5-5' } as never,
+      uuid: 'marks-row',
+    })
+    .catch(() => undefined)
+  for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
+    for (const cols of [40, 64, 120]) {
+      const ui = await $.ui.mount({ ...pane(cols), surface })
+      // A terminal draws all 30 marks; a graphical surface draws fewer where 30 would not fit
+      // (24 in the 36 cells of a 40-column pane), always ending on the newest.
+      const strip = await ui.find({ type: 'Text', text: /^[■✗]{2,}$/ })
+      expect(strip?.props.wrap).toBe('truncate-start')
+      expect(strip?.text.length).toBe(surface !== 'terminal' && cols === 40 ? 24 : 30)
+      expect(strip?.text.endsWith('✗')).toBe(true)
+      expect((await ui.find({ type: 'Text', text: /^●$/ }))?.props.wrap).toBe('truncate-start')
+      expect((await ui.find({ type: 'Text', text: /^[─━◆]+$/ }))?.props.wrap).toBe('truncate-middle')
+      expect((await ui.find({ key: 'legend' }))?.props.marginBottom).toBe(surface === 'terminal' ? 0 : 1)
+      await ui.unmount()
+    }
+  }
+})
+
+test("the inline summary's strip holds fewer marks on a graphical surface and keeps the newest", async ($, on) => {
+  engine(on)
+  on('tool.check', (_$, e) => ({ decision: e.tool_use_id === 'n59' ? 'deny' : 'allow' }))
+  for (let i = 0; i < 60; i += 1) await $.tool.check({ tool: 'Bash', input: { command: `ls ${i}` }, tool_use_id: `n${i}` })
+  for (const surface of ['terminal', 'vscode'] as const) {
+    const ui = await $.ui.mount({ ...pane(80), props: { ...pane(80).props, placement: 'inline' as const }, surface })
+    // 80 columns less "gate " and " 59 allowed · 0 you · 1 denied" leave 45: 45 marks in a terminal, 30 elsewhere.
+    const strip = await ui.find({ type: 'Text', text: /^[■✗]{2,}$/ })
+    expect(strip?.props.wrap).toBe('truncate-start')
+    expect(strip?.text.length).toBe(surface === 'terminal' ? 45 : 30)
+    expect(strip?.text.endsWith('✗')).toBe(true)
+    expect(await ui.find({ text: /59 allowed/ })).toBeDefined()
     await ui.unmount()
   }
 })
