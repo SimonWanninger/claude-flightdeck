@@ -437,8 +437,17 @@ export const applyStep = (c: AgentCard, s: { model: string; usage: StepUsage; st
 
 export const noteTool = (c: AgentCard, n: ToolNote): AgentCard => ({ ...c, tools: [...c.tools, n].slice(-3) })
 
-/** A spawned card joins the list; an id already there (an agent resumed) is replaced, so no two cards share keys. */
-export const addCard = (cards: AgentCard[], card: AgentCard): AgentCard[] => [...cards.filter(c => c.id !== card.id), card].slice(-24)
+/** A card whose agent was resumed after it finished (SendMessage): running again, its clock from its first spawn. */
+export const resumeCard = (c: AgentCard): AgentCard => ({ ...c, status: 'running', endedAt: null })
+
+/**
+ * A spawned card joins the list. An id already there is that agent resumed: its card runs again
+ * where it stands, with its tallies and the new task, so no two cards share keys.
+ */
+export const addCard = (cards: AgentCard[], card: AgentCard): AgentCard[] =>
+  cards.some(c => c.id === card.id)
+    ? cards.map(c => (c.id === card.id ? resumeCard({ ...c, description: card.description || c.description }) : c))
+    : [...cards, card].slice(-24)
 
 export const stepLoop = (loops: Loop[], id: string, at: number): Loop[] => {
   const found = loops.find(l => l.id === id)

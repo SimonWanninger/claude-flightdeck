@@ -6,6 +6,7 @@ import {
   DEFAULT_GATE,
   DEFAULT_TURN,
   addCard,
+  resumeCard,
   afterCall,
   applyStep,
   consultTimeline,
@@ -123,11 +124,13 @@ test("a card's context is its latest step's whole input; output adds up", () => 
   expect([c.ctx, c.out, c.steps, c.lastStop, c.model]).toEqual([40_005, 1200, 2, 'max_tokens', 'claude-sonnet-5-5'])
 })
 
-test('a resumed agent replaces its card instead of adding a second', () => {
-  const a = normalizeCard({ id: 'a', description: 'first' })
+test('a resumed agent runs again on its own card instead of adding a second', () => {
+  const a = { ...normalizeCard({ id: 'a', description: 'first', spawnedAt: 5 }), status: 'done' as const, endedAt: 100, steps: 4, out: 900 }
   const b = normalizeCard({ id: 'b' })
-  const cards = addCard(addCard(addCard([], a), b), { ...a, description: 'again' })
-  expect(cards.map(c => `${c.id}:${c.description}`)).toEqual(['b:', 'a:again'])
+  const cards = addCard(addCard(addCard([], a), b), { ...normalizeCard({ id: 'a', description: 'again', spawnedAt: 200 }) })
+  expect(cards.map(c => `${c.id}:${c.description}`)).toEqual(['a:again', 'b:'])
+  expect(cards[0] && [cards[0].status, cards[0].endedAt, cards[0].steps, cards[0].out, cards[0].spawnedAt]).toEqual(['running', null, 4, 900, 5])
+  expect([resumeCard(a).status, resumeCard(a).endedAt]).toEqual(['running', null])
 })
 
 test('consults open, close by id, and draw on a shared timeline', () => {
@@ -570,4 +573,36 @@ test('a draw that fails says why instead of leaving the pane empty', async ($, o
     expect(await ui.find({ text: /^draw failed \(throw\)/ })).toBeDefined()
     await ui.unmount()
   }
+})
+
+test('a finished agent that takes another step (resumed by SendMessage) runs again, in the pane and the status line', async ($, on) => {
+  // engine(on), with a status line that keeps what it was told
+  mock.clock(on)
+  const status: (string | undefined)[] = []
+  on('ui.status', (_$, e) => (status.push(e.text), { value: undefined }))
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'r1' }))
+  const usage = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'claude-sonnet-5-5' }
+  on('turn.step', async function* () {
+    return { turnId: 'R1', index: 0, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage }
+  })
+  const step = async () => {
+    const s = $.turn.step({ turnId: 'R1', index: 0, model: 'claude-sonnet-5-5', messageCount: 1, agentId: 'r1' })
+    for await (const _ of s) void _
+    await s.result
+  }
+  await $.turn.start({ text: 'go', turnId: 'T1' })
+  await $.agent.spawn(spawn('general-purpose', 'Audit the parser'))
+  await step()
+  await $.turn.complete({ answer: 'ok', durationMs: 10, isAborted: false, turnId: 'R1', agentId: 'r1', reason: 'answer' })
+  expect(status[status.length - 1]).toMatch(/agents 0\/1/)
+  await step()
+  expect(status[status.length - 1]).toMatch(/agents 1\/1/)
+  const ui = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+  expect(await ui.find({ text: /◐ running/ })).toBeDefined()
+  expect(await ui.find({ text: /✓ done/ })).toBeUndefined()
+  expect(await ui.find({ text: /^resumed$/ })).toBeDefined()
+  expect(await ui.find({ text: /ctx 10 · out 10 · 2 st/ })).toBeDefined()
+  await ui.unmount()
 })

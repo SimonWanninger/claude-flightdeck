@@ -5,6 +5,7 @@ import type { AgentCard, Architect, Bucket, Check, Gate, Layout, LogLine, Loop, 
 import {
   DEFAULT_ARCHITECT,
   addCard,
+  resumeCard,
   DEFAULT_GATE,
   DEFAULT_MAIN,
   DEFAULT_ROSTER,
@@ -334,8 +335,15 @@ export const register: Register = (on, options) => {
       if (speed) await update($, main, m => ({ ...normalize(DEFAULT_MAIN, m), speed }))
       return result
     }
-    const result = yield* next(e)
     const id = e.agentId
+    // A step from an agent whose card finished means it was resumed (SendMessage): it runs again.
+    const before = (await getCards($)).find(c => c.id === id)
+    if (before && before.status !== 'running') {
+      await update($, agents, list => listOf<unknown>(list).map(normalizeCard).map(c => (c.id === id ? resumeCard(c) : c)))
+      await say($, await whoIs($, id), 'resumed', 'info', id)
+      await refreshStatus($, cfg)
+    }
+    const result = yield* next(e)
     const [cards, a] = await Promise.all([getCards($), getArchitect($)])
     if (cards.some(c => c.id === id)) {
       const step = { model: e.model, usage: result.usage, stopReason: result.stopReason }
@@ -489,9 +497,10 @@ export const register: Register = (on, options) => {
       description: e.description,
       spawnedAt: await $.clock.now(),
     }
+    const isResumed = (await getCards($)).some(c => c.id === id)
     await update($, agents, list => addCard(listOf<unknown>(list).map(normalizeCard), card))
     await update($, loops, l => listOf<Loop>(l).filter(x => x.id !== id))
-    await say($, shorten(cardTitle(card), 12), `spawned · ${card.type}`, 'info', id)
+    await say($, shorten(cardTitle(card), 12), isResumed ? 'resumed' : `spawned · ${card.type}`, 'info', id)
     await refreshStatus($, cfg)
     return started
   })
@@ -537,12 +546,14 @@ export const register: Register = (on, options) => {
 
   // ---------------------------------------------------------------- drawing
 
-  // After a surface module faults, this load draws the rails and clocks as plain text.
-  let isClientOff = false
+  // After a surface module faults on a surface, this load draws it there as plain text; the other
+  // module, and other surfaces, keep theirs. Keyed `surface:rail.tsx`.
+  const faulted = new Set<string>()
   on('ui.fault', async ($, e, next) => {
-    if (e.requestId === PANE && !isClientOff) {
-      isClientOff = true
-      $.ui.log(`flightdeck: ${e.module} faulted (${e.phase}: ${e.reason}); drawing without animation`)
+    const key = `${e.surface}:${e.module.split('/').pop()}`
+    if (e.requestId === PANE && !faulted.has(key)) {
+      faulted.add(key)
+      $.ui.log(`flightdeck: ${e.module} faulted on ${e.surface} (${e.phase}: ${e.reason}); drawing it without animation`)
       $.ui.invalidate('ui.render')
     }
     return next(e)
@@ -551,7 +562,9 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const els = $.ui.resolve(e)
     const { Box, Text, Button } = els
-    const hasClient = 'Client' in els && !isClientOff
+    const hasClient = 'Client' in els
+    const hasRail = hasClient && !faulted.has(`${e.surface}:rail.tsx`)
+    const hasClock = hasClient && !faulted.has(`${e.surface}:elapsed.tsx`)
     const [m, u, a, g, cards, lp, lines, t, r, v, now] = await Promise.all([
       getMain($),
       getUsage($),
@@ -574,7 +587,7 @@ export const register: Register = (on, options) => {
     const advising = isAdvising(a)
     const running = cards.filter(c => c.status === 'running')
     const showArchitect = a.consults.length > 0 || a.ids.length > 0
-    const motion = cfg.motion && hasClient
+    const motion = cfg.motion && hasRail
     // A panel with nothing to show yet takes no room: most sessions never spawn an agent.
     const isEmpty: Record<Panel, boolean> = {
       main: false,
@@ -606,7 +619,7 @@ export const register: Register = (on, options) => {
     const clock = (key: string, since: number, endAt: number | null, color: string) =>
       since <= 0 ? (
         <Text color={color}>—</Text>
-      ) : hasClient ? (
+      ) : hasClock ? (
         <els.Client key={key} module="./elapsed.tsx" props={{ since, now, endAt, color }} />
       ) : (
         <Text color={color}>{fmtTimer((endAt ?? now) - since)}</Text>
