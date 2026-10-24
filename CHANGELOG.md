@@ -10,6 +10,7 @@
 - A subagent's turn start (its spawn, or a resume) no longer logs its prompt as yours or resets the main turn's receipt counters.
 - `paneColumns` sets the width the docked pane asks for (default 66, at least 40; Claude Code caps the dock at 45% of the terminal). ([#6](https://github.com/scasella/claude-flightdeck/issues/6), thanks @matheusmaais)
 - README: options go under the plugin's id in `pluginConfigs` in your user settings: `flightdeck@claude-flightdeck` when installed, `flightdeck` with `--plugin-dir`. Project settings aren't read. ([#13](https://github.com/scasella/claude-flightdeck/issues/13), thanks @jangerhard) Troubleshooting notes that the VS Code extension may show no mod pane yet. ([#5](https://github.com/scasella/claude-flightdeck/issues/5), thanks @jonathon-lawlor798)
+- The pane draws at its real width down to 24 columns, the narrowest dock Claude Code seats, instead of never narrower than 40. A desktop pane or terminal dock under 40 columns no longer has the right side of every box cut off. Below 40 the agents header, the lanes, other loops and the session log take shorter forms, and the agents' time axis on graphical surfaces scales to the pane instead of a fixed 520 pixels. The gate's file, shell and other buttons wrap rather than run past the box, which they also did at 40 with a drill-down open. From 40 columns up the pane draws as before.
 
 ## 0.4.0
 

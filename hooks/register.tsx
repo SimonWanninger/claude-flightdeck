@@ -639,7 +639,8 @@ export const register: Register = (on, options) => {
       getView($),
       $.clock.now(),
     ])
-    const W = Math.max(40, e.props.bodyColumns)
+    // The body's own width, down to the narrowest dock Claude Code seats (24): a wider drawing is cut off at the frame.
+    const W = Math.max(24, e.props.bodyColumns)
     const layout = v.layout ?? cfg.layout
     const isWide = layout === 'wide' || (layout === 'auto' && W >= 110)
     const colW = isWide ? Math.floor((W - 2) / 2) : W
@@ -705,10 +706,12 @@ export const register: Register = (on, options) => {
     const mainPanel = (w: number) => (
       <Box flexDirection="column" borderStyle="round" borderColor={C.main} paddingX={1} width={w}>
         <Box justifyContent="space-between">
-          <Text color={C.main} bold>
+          <Text color={C.main} bold wrap="truncate">
             {modelName} · main
           </Text>
-          <Text color={m.isRunning ? C.main : C.dim}>{m.isRunning ? '● working' : '○ idle'}</Text>
+          <Box flexShrink={0}>
+            <Text color={m.isRunning ? C.main : C.dim}>{m.isRunning ? '● working' : '○ idle'}</Text>
+          </Box>
         </Box>
         <Text wrap="truncate">
           <Text dimColor>effort </Text>
@@ -760,15 +763,17 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="column" borderStyle="round" borderColor={C.arch} paddingX={1} width={w}>
           <Box justifyContent="space-between">
-            <Text color={C.arch} bold>
+            <Text color={C.arch} bold wrap="truncate">
               {cfg.architectLabel} · {advising ? 'advising' : 'on call'}
             </Text>
-            <Text>
-              <Text dimColor>consults </Text>
-              <Text color={C.arch} bold>
-                {a.consults.length}
+            <Box flexShrink={0}>
+              <Text>
+                <Text dimColor>consults </Text>
+                <Text color={C.arch} bold>
+                  {a.consults.length}
+                </Text>
               </Text>
-            </Text>
+            </Box>
           </Box>
           <Text color={C.arch} wrap="truncate-middle">
             {tl}
@@ -819,10 +824,12 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="column" borderStyle="round" borderColor={C.gate} paddingX={1} width={w}>
           <Box justifyContent="space-between">
-            <Text color={C.gate} bold>
+            <Text color={C.gate} bold wrap="truncate">
               {cfg.gateLabel} · permissions
             </Text>
-            <Text dimColor>{`${s.total} checks`}</Text>
+            <Box flexShrink={0}>
+              <Text dimColor>{`${s.total} checks`}</Text>
+            </Box>
           </Box>
           {strip.length === 0 ? <Text color={C.faint}>no checks yet</Text> : markRow(strip.map(checkMark))}
           <Text wrap="truncate">
@@ -834,7 +841,8 @@ export const register: Register = (on, options) => {
             <Text color={s.deny > 0 ? C.warn : C.dim}>{`✗ ${s.deny} denied`}</Text>
             {w >= 80 && g.recent.some(c => c.inSubagent) ? <Text color={C.faint}>{'  dim: in subagents'}</Text> : null}
           </Text>
-          <Box columnGap={2}>
+          {/* Below about 44 columns the three rows' buttons take two lines rather than run past the box. */}
+          <Box columnGap={2} flexWrap="wrap">
             {(['file', 'shell', 'other'] as const).map((b: Bucket) => {
               const tl = g.totals[b]
               const n = tl.rule + tl.ask + tl.cleared + tl.deny
@@ -876,10 +884,17 @@ export const register: Register = (on, options) => {
       // Cards need 20 columns each; when the pane can't hold the limit, lanes take over.
       const fit = Math.max(1, Math.min(cfg.maxCards, Math.floor((w + 1) / 21)))
       const useLanes = cards.length > fit
+      const isNarrow = w < 40
       const header = (
         <Box justifyContent="space-between" width={w}>
-          <Text bold>{`agents · ${running.length} running · ${cards.length} total`}</Text>
-          {cards.length > 0 ? <Text color={C.faint}>1-{Math.min(cards.length, useLanes ? 6 : fit)} expand</Text> : null}
+          <Text bold wrap="truncate">
+            {isNarrow ? `agents · ${running.length}/${cards.length}` : `agents · ${running.length} running · ${cards.length} total`}
+          </Text>
+          {cards.length > 0 ? (
+            <Box flexShrink={0}>
+              <Text color={C.faint}>{`1-${Math.min(cards.length, useLanes ? 6 : fit)}${isNarrow ? '' : ' expand'}`}</Text>
+            </Box>
+          ) : null}
         </Box>
       )
       if (cards.length === 0) {
@@ -892,7 +907,10 @@ export const register: Register = (on, options) => {
       }
       if (useLanes) {
         const shown = cards.slice(-6)
-        const barW = Math.max(8, w - 28)
+        // A lane is its glyph, a label, the bar and a clock: below 34 columns the label narrows, below
+        // 36 the bar, so a 24-column pane still holds it. From 40 they are as they always were.
+        const labelW = Math.min(17, Math.max(7, w - 17))
+        const barW = Math.max(4, w - 11 - labelW)
         const geo = lanes(shown, now, barW)
         return (
           <Box flexDirection="column" width={w}>
@@ -904,8 +922,8 @@ export const register: Register = (on, options) => {
               return (
                 <Box>
                   <Text color={statusColor(c)} bold={isViewed}>{`${isViewed ? '▶' : glyph(c)} `}</Text>
-                  <Box width={17}>
-                    <Button key={`card-${c.id}`} plain hotkey={String(i + 1)} label={shorten(cardTitle(c), 14)} onPress={expandOnPress(c.id)} />
+                  <Box width={labelW}>
+                    <Button key={`card-${c.id}`} plain hotkey={String(i + 1)} label={shorten(cardTitle(c), labelW - 3)} onPress={expandOnPress(c.id)} />
                   </Box>
                   <Text color={C.faint}>{' ' + '·'.repeat(gm?.before ?? 0)}</Text>
                   <Text color={statusColor(c)}>{'━'.repeat(gm?.bar ?? 1)}</Text>
@@ -989,10 +1007,11 @@ export const register: Register = (on, options) => {
       if (lp.length === 0) return null
       const active = lp.filter(l => isLoopActive(l, now)).length
       const dots = lp.slice(-Math.max(4, marksIn(w - 38, isTerminal)))
+      const isNarrow = w < 40
       return (
         <Box width={w}>
-          <Text bold>other loops </Text>
-          <Text dimColor>{`${lp.length} seen · ${active} active  `}</Text>
+          <Text bold>{isNarrow ? 'loops ' : 'other loops '}</Text>
+          <Text dimColor>{isNarrow ? `${lp.length} · ${active} active ` : `${lp.length} seen · ${active} active  `}</Text>
           {markRow(
             dots.map(l => (
               <Text color={isLoopActive(l, now) ? C.agent : l.isDone ? C.dim : C.faint}>{isLoopActive(l, now) ? '●' : l.isDone ? '✓' : '○'}</Text>
@@ -1022,7 +1041,11 @@ export const register: Register = (on, options) => {
           ) : (
             <Text color={C.faint}>no turn finished yet</Text>
           )}
-          {isReview ? <Text color={C.arch}>{`${cfg.architectLabel.toLowerCase()} reviewing before done (inferred)`}</Text> : null}
+          {isReview ? (
+            <Text color={C.arch} wrap="wrap">
+              {`${cfg.architectLabel.toLowerCase()} reviewing before done (inferred)`}
+            </Text>
+          ) : null}
         </Box>
       )
     }
@@ -1035,16 +1058,19 @@ export const register: Register = (on, options) => {
     const shownLines = (viewed ? lines.filter(l => l.agentId === viewed) : lines).slice(-nLog)
     const colorOf = (l: LogLine) =>
       l.kind === 'error' ? C.warn : l.kind === 'consult' ? C.arch : l.who === 'main' ? C.main : l.who === 'gate' ? C.gate : l.who === 'you' ? C.text : C.agent
+    // Below 40 columns a line keeps its minute, not its second, and a shorter name.
     const logPanel = (w: number) => (
       <Box flexDirection="column" borderStyle="round" borderColor={C.faint} paddingX={1} marginTop={1} width={w}>
-        <Text dimColor>{viewed ? 'session log · this agent' : 'session log'}</Text>
+        <Text dimColor wrap="truncate">
+          {viewed ? 'session log · this agent' : 'session log'}
+        </Text>
         {shownLines.length === 0 ? <Text color={C.faint}>nothing yet</Text> : null}
         {shownLines.map(l => (
           <Box>
-            <Box width={9} flexShrink={0}>
-              <Text color={C.faint}>{fmtClock(l.at)}</Text>
+            <Box width={w < 40 ? 6 : 9} flexShrink={0}>
+              <Text color={C.faint}>{w < 40 ? fmtClock(l.at).slice(0, 5) : fmtClock(l.at)}</Text>
             </Box>
-            <Box width={13} flexShrink={0}>
+            <Box width={w < 40 ? 9 : 13} flexShrink={0}>
               <Text color={colorOf(l)} bold wrap="truncate">
                 {l.who}
               </Text>
@@ -1112,12 +1138,12 @@ export const register: Register = (on, options) => {
               })
               .join('')
             const svgH = Math.min(10, cards.length) * rowH + 4
+            // No width or height on the element: it takes the markup's own width up to the pane's and
+            // scales down to fit a narrow one, rather than running past it at 520 pixels.
             return (
               <Svg
                 source={`<svg xmlns="http://www.w3.org/2000/svg" width="${pxW}" height="${svgH}" viewBox="0 0 ${pxW} ${svgH}">${rects}</svg>`}
                 alt={`${cards.length} agents on a time axis`}
-                width={pxW}
-                height={svgH}
               />
             )
           })()
@@ -1157,7 +1183,7 @@ export const register: Register = (on, options) => {
           {live.map(c => (
             <Box>
               <Text color={statusColor(c)}>{`${glyph(c)} `}</Text>
-              <Box width={Math.max(10, W - 30)}>
+              <Box width={Math.max(6, W - 30)}>
                 <Text wrap="truncate">{cardTitle(c)}</Text>
               </Box>
               <Text dimColor>{c.steps > 0 ? ` ctx ${kTokens(c.ctx)} ` : ' '}</Text>
