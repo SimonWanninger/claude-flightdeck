@@ -27,7 +27,7 @@ All three must pass. The type check needs `.claude-plugin/types/`, which Claude 
 - **Real data only.** Every number on the pane must come from a session event. If something is inferred, label it in the pane and in the README's "What is inferred" section.
 - **Watch, don't act.** Hooks pass their events on unchanged; Flightdeck never denies, rewrites or delays anything.
 - **Behaviour in `hooks/core.ts`.** Reducers and layout rules are pure functions with tests. `register.tsx` wires them to events and draws.
-- **Narrow panes.** Check a drawing change at 40, 64 and 120 columns.
+- **Narrow panes.** Check a drawing change at 24, 40, 64 and 120 columns. The pane draws at its real width down to 24, the narrowest dock Claude Code seats, and a test checks every width from 24 to 40 for anything that spills past its box.
 - **No secrets in state.** Anything stored from a tool input goes through `redact()` first.
 
 When you report a bug, include `claude --version` and any dim `flightdeck:` line from the transcript.

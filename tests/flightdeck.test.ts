@@ -1,5 +1,6 @@
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
+import type { TestBody } from 'claude-code/testing'
 
 import {
   DEFAULT_ARCHITECT,
@@ -918,4 +919,153 @@ test("a subagent's turn start is its own: no prompt line, and the main turn keep
   expect(await ui.find({ text: /refactor it/ })).toBeDefined()
   expect(await ui.find({ text: /· 1 edit ·/ })).toBeDefined()
   await ui.unmount()
+})
+
+// ---------------------------------------------------------------- width check
+
+// The kit lays nothing out, so this measures the drawn tree as a row layout would: the fewest cells
+// each element needs without spilling (a truncating Text or a clipping Box needs none, a Text that
+// asks to wrap its longest word, any other Text its whole length, a plain Button with a hotkey `1: `
+// more than its label), and checks that every Box given a width holds what it contains.
+type Drawn = { type: string; props?: Record<string, unknown>; children?: unknown[] }
+const isDrawn = (n: unknown): n is Drawn => typeof n === 'object' && n !== null && typeof (n as Drawn).type === 'string'
+const cellsOf = (s: string) => [...s].length
+const textOf = (n: unknown): string =>
+  typeof n === 'string' || typeof n === 'number' ? String(n) : isDrawn(n) ? (n.children ?? []).map(textOf).join('') : ''
+const spaceOf = (v: unknown) => (typeof v === 'number' ? v : v === undefined ? 0 : 1)
+const longestWord = (s: string) => Math.max(0, ...s.split(/\s+/).map(cellsOf))
+const needs = (n: unknown, out: string[], path: string): number => {
+  if (typeof n === 'string') return longestWord(n)
+  if (!isDrawn(n)) return 0
+  const p = n.props ?? {}
+  const here = `${path}/${String(p.key ?? n.type)}`
+  if (n.type === 'Text') return p.wrap === undefined ? cellsOf(textOf(n)) : p.wrap === 'wrap' ? longestWord(textOf(n)) : 1
+  if (n.type === 'Button') return cellsOf(String(p.label ?? '')) + (p.plain ? (p.hotkey ? 3 : 0) : 4)
+  if (n.type === 'Client') return typeof p.width === 'number' ? p.width : 5
+  if (n.type !== 'Box') return 0
+  const kids = (n.children ?? []).filter(c => c !== null && c !== undefined && c !== false && c !== '')
+  const inner = kids.map((c, i) => needs(c, out, `${here}[${i}]`))
+  const isColumn = p.flexDirection === 'column' || p.flexDirection === 'column-reverse'
+  const content =
+    isColumn || p.flexWrap === 'wrap'
+      ? Math.max(0, ...inner)
+      : inner.reduce((a, b) => a + b, 0) + spaceOf(p.columnGap ?? p.gap) * Math.max(0, inner.length - 1)
+  const need = content + (p.borderStyle ? 2 : 0) + 2 * spaceOf(p.paddingX ?? p.padding)
+  if (typeof p.width === 'number') {
+    if (need > p.width && p.overflow !== 'hidden') out.push(`${here}: needs ${need} in ${p.width}`)
+    return p.width
+  }
+  return p.overflow === 'hidden' ? 0 : need
+}
+const spillsOf = (tree: unknown, columns: number) => {
+  const out: string[] = []
+  const need = needs(tree, out, '')
+  if (need > columns) out.push(`root: needs ${need} in ${columns}`)
+  return out
+}
+
+/** A session with every panel busy: a compaction window, limits, consults with advice, checks of every kind, agents, a loop. */
+const busySession = async ($: Parameters<TestBody>[0], on: On) => {
+  const clock = engine(on)
+  await clock.advance(3_600_000) // clocks draw as m:ss, as in a session, not as the '—' of an unknown start
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  on('tool.check', (_$, e) => ({ decision: (e.tool_use_id ?? '').endsWith('7') ? 'deny' : 'allow' }))
+  on('tool.call', () => ({ result: {}, text: 'ok' }))
+  let n = 0
+  on('agent.spawn', (_$, e) => ({ model: 'claude-sonnet-5-5', agentId: e.subagentType.includes('advisor') ? 'adv1' : `b${++n}` }))
+  const usage = { input_tokens: 4000, output_tokens: 900, cache_read_input_tokens: 120_000, cache_creation_input_tokens: 0, model: 'claude-opus-5-5' }
+  on('turn.step', async function* () {
+    yield { kind: 'text' as const, index: 0, text: 'ok' }
+    yield { kind: 'stop' as const, stopReason: 'end_turn' as const, usage }
+    return { turnId: 'B1', index: 0, answer: 'ok', toolUses: [], stopReason: 'end_turn' as const, usage }
+  })
+  const step = async (agentId?: string) => {
+    const s = $.turn.step({ turnId: 'B1', index: 0, model: 'claude-opus-5-5[1m]', messageCount: 1, ...(agentId ? { agentId } : {}) })
+    for await (const _ of s) void _
+    await s.result
+  }
+  await $.session.measure({
+    context: { window: 1_000_000, tokens: 360_000, percent: 36 },
+    rateLimits: [
+      { kind: 'five_hour', percentUsed: 82, resetsAt: new Date(3 * 3_600_000).toISOString() },
+      { kind: 'seven_day_opus', percentUsed: 40, resetsAt: new Date(4 * 86_400_000).toISOString() },
+    ],
+    cost: { usd: 123.45 },
+    changed: ['context', 'rateLimits', 'cost'],
+  } as never)
+  await $.turn.start({ text: 'Refactor the configuration loader and keep every public name stable please', turnId: 'B1' })
+  await step()
+  const tools = [
+    { tool: 'Bash', input: { command: 'npm run test -- --reporter=verbose --coverage packages/configuration-loader' } },
+    { tool: 'Read', input: { file_path: '/Users/someone/projects/a-very-long-repository-name/src/configuration/loader.ts' } },
+    { tool: 'WebFetch', input: { url: 'https://example.com/a/very/long/documentation/path/for/the/loader' } },
+  ]
+  for (let i = 0; i < 60; i += 1) await $.tool.check({ ...tools[i % 3]!, tool_use_id: `k${i}` })
+  await $.tool.call({ tool: 'Edit', file_path: '/x/loader.ts', old_string: 'a', new_string: 'b' } as never)
+  await $.agent.spawn(spawn('fable-advisor:fable-advisor', 'final review of the loader'))
+  await $.turn.complete({
+    answer: 'Ship it once the configuration loader keeps its public names and the migration test covers the old shape',
+    durationMs: 9000, isAborted: false, turnId: 'A1', agentId: 'adv1', reason: 'answer',
+  })
+  for (const d of ['Write the configuration loader regression tests', 'Map every call site of the old loader', 'Review the migration path for saved state']) {
+    await $.agent.spawn(spawn('general-purpose', d))
+  }
+  await step('b1')
+  await step('wf-unclaimed-loop')
+  await clock.advance(95_000)
+  await $.turn.complete({ answer: '', durationMs: 95_000, isAborted: false, turnId: 'B1', reason: 'answer' })
+  return clock
+}
+
+test('every panel fits the pane at every width from 24 columns, on every surface and placement', { timeoutMs: 60_000 }, async ($, on) => {
+  await busySession($, on)
+  const failures: string[] = []
+  const check = async (label: string) => {
+    for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
+      for (let cols = 24; cols <= 40; cols += 1) {
+        for (const placement of ['dock', 'inline'] as const) {
+          const ui = await $.ui.mount({ ...pane(cols), props: { ...pane(cols).props, placement }, surface })
+          for (const s of spillsOf(await ui.drawn(), cols)) failures.push(`${label} ${surface} ${placement} ${cols}: ${s}`)
+          await ui.unmount()
+        }
+      }
+      for (const cols of [64, 120]) {
+        const ui = await $.ui.mount({ ...pane(cols), surface })
+        for (const s of spillsOf(await ui.drawn(), cols)) failures.push(`${label} ${surface} dock ${cols}: ${s}`)
+        await ui.unmount()
+      }
+    }
+  }
+  await check('lanes, finished')
+  // The gate drill-down and an expanded card open, and a turn running.
+  const opener = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+  await opener.press({ key: 'gate-shell' })
+  await opener.press({ key: 'card-b1' })
+  await opener.unmount()
+  await $.turn.start({ text: 'and once more', turnId: 'B2' })
+  await check('drill-down, expanded, running')
+  // One line per panel and width that spills, the surface left out (they draw the same boxes).
+  expect([...new Set(failures.map(f => f.replace(/ (terminal|desktop|vscode|mobile) /, ' ')))]).toEqual([])
+})
+
+test('a single agent card fits from 24 columns, and the time axis scales to the pane', async ($, on) => {
+  const clock = engine(on)
+  await clock.advance(3_600_000)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'one' }))
+  await $.turn.start({ text: 'go', turnId: 'O1' })
+  await $.agent.spawn(spawn('general-purpose', 'Write the configuration loader regression tests'))
+  const failures: string[] = []
+  for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
+    for (let cols = 24; cols <= 40; cols += 1) {
+      const ui = await $.ui.mount({ ...pane(cols), surface })
+      for (const s of spillsOf(await ui.drawn(), cols)) failures.push(`${surface} ${cols}: ${s}`)
+      if (surface !== 'terminal') {
+        // No pixel width of its own: the surface draws it at the markup's width, down to the pane's.
+        const svg = await ui.find({ type: 'Svg' })
+        expect([svg !== undefined, svg?.props.width, svg?.props.height]).toEqual([true, undefined, undefined])
+      }
+      await ui.unmount()
+    }
+  }
+  expect(failures).toEqual([])
 })
