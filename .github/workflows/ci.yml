@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CLAUDE_CODE_VERSION: 2.1.309
@@ -60,7 +60,7 @@ jobs:
           printf '{"hasCompletedOnboarding":true,"theme":"dark","projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' \
             "$(pwd -P)" > "$CLAUDE_CONFIG_DIR/.claude.json"
           screen="$RUNNER_TEMP/claude-screen.log"
-          # sleep holds stdin open: util-linux script passes stdin's EOF on to the session
+          # sleep keeps stdin open, so script never hands the session an EOF
           setsid bash -c "sleep 300 | script -qfc 'claude --plugin-dir .' '$screen'" > /dev/null 2>&1 &
           pid=$!
           types=.claude-plugin/types
