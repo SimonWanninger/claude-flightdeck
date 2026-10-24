@@ -18,8 +18,11 @@ import {
   applyStep,
   bucketOf,
   cardTitle,
-  compactWindowOf,
+  afterCompactRead,
+  claimCompactRead,
   contextFill,
+  faultKey,
+  forgetCompactRead,
   titleLines,
   consultTimeline,
   describeInput,
@@ -209,16 +212,11 @@ async function resetAll($: EngineInterface) {
 
 /**
  * Stores the compaction window for the model window `window`. A `summary` breakdown estimates locally
- * and sends no request; where the host gives none, the gauge stays on the model's window. Dropped when
- * the model changed again while it was read; a call that failed is asked again at the next measurement.
+ * and sends no request; until the host gives one, the gauge stays on the model's window (afterCompactRead).
  */
 async function readCompactWindow($: EngineInterface, window: number) {
   const r = await $.session.usage({ breakdown: 'summary' }).catch(() => null)
-  const compactWindow = compactWindowOf(r?.context.breakdown, window)
-  await update($, usage, x => {
-    const u = normalize(DEFAULT_USAGE, x)
-    return u.compactFor !== window ? u : r === null ? { ...u, compactWindow: null, compactFor: 0 } : { ...u, compactWindow }
-  })
+  await update($, usage, x => afterCompactRead(normalize(DEFAULT_USAGE, x), window, r?.context.breakdown))
 }
 
 /** The session's cost read fresh, not from the last measurement: the receipt subtracts two of these. */
@@ -258,6 +256,7 @@ export const register: Register = (on, options) => {
         tokens: u.context.tokens ?? null,
         window: u.context.window,
         compactFor: resumedWindow,
+        compactMisses: 0,
         costUsd: u.cost?.usd ?? null,
         limits: u.rateLimits.map(limitOf),
       }))
@@ -320,6 +319,8 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
+    // A subagent's turn (its spawn, or a resume by SendMessage) is its card's, not the main turn's.
+    if (e.agentId !== undefined) return next(e)
     const [now, cost] = await Promise.all([$.clock.now(), costNow($)])
     await update($, turn, () => ({ ...DEFAULT_TURN, startedAt: now, costAtStart: cost }))
     await update($, main, m => ({ ...normalize(DEFAULT_MAIN, m), isRunning: true }))
@@ -340,10 +341,13 @@ export const register: Register = (on, options) => {
   on('turn.step', async function* ($, e, next) {
     // The main loop's model is known when its request starts; a long first request shouldn't read "—".
     if (!e.agentId) {
+      let isNewModel = false
       await update($, main, m => {
         const x = normalize(DEFAULT_MAIN, m)
+        isNewModel = x.model !== '' && x.model !== e.model
         return { ...x, model: e.model, effort: String(e.effort ?? x.effort), steps: x.steps + 1 }
       })
+      if (isNewModel) await update($, usage, x => forgetCompactRead(normalize(DEFAULT_USAGE, x)))
       // Time the response as it passes: the first piece that is not the engine's envelope, then the
       // stop chunk. Two clock reads in the stream and nothing stored until it has ended.
       const sentAt = await $.clock.now()
@@ -364,9 +368,21 @@ export const register: Register = (on, options) => {
     // A step from an agent whose card finished means it was resumed (SendMessage): it runs again.
     const before = (await getCards($)).find(c => c.id === id)
     if (before && before.status !== 'running') {
-      await update($, agents, list => listOf<unknown>(list).map(normalizeCard).map(c => (c.id === id ? resumeCard(c) : c)))
-      await say($, await whoIs($, id), 'resumed', 'info', id)
-      await refreshStatus($, cfg)
+      // Flipped in the write: a resume its agent.spawn already logged is not logged again.
+      let isResumed = false
+      await update($, agents, list =>
+        listOf<unknown>(list)
+          .map(normalizeCard)
+          .map(c => {
+            if (c.id !== id || c.status === 'running') return c
+            isResumed = true
+            return resumeCard(c)
+          }),
+      )
+      if (isResumed) {
+        await say($, await whoIs($, id), 'resumed', 'info', id)
+        await refreshStatus($, cfg)
+      }
     }
     const result = yield* next(e)
     const [cards, a] = await Promise.all([getCards($), getArchitect($)])
@@ -386,14 +402,13 @@ export const register: Register = (on, options) => {
     // estimates every category each time): claimed here, in the same write, so no two reads overlap.
     let isStale = false
     await update($, usage, x => {
-      const u = normalize(DEFAULT_USAGE, x)
-      isStale = e.context.window > 0 && u.compactFor !== e.context.window
+      const claim = claimCompactRead(normalize(DEFAULT_USAGE, x), e.context.window)
+      isStale = claim.isClaimed
       return {
-        ...u,
+        ...claim.usage,
         pct: e.context.percent ?? null,
         tokens: e.context.tokens ?? null,
         window: e.context.window,
-        compactFor: isStale ? e.context.window : u.compactFor,
         costUsd: e.cost?.usd ?? null,
         limits: e.rateLimits.map(limitOf),
       }
@@ -535,10 +550,18 @@ export const register: Register = (on, options) => {
       description: e.description,
       spawnedAt: await $.clock.now(),
     }
-    const isResumed = (await getCards($)).some(c => c.id === id)
-    await update($, agents, list => addCard(listOf<unknown>(list).map(normalizeCard), card))
+    // Decided in the write: a resume whose first step already put its card back to running is not logged again.
+    let isNew = true
+    let isResumed = false
+    await update($, agents, list => {
+      const cards = listOf<unknown>(list).map(normalizeCard)
+      const known = cards.find(c => c.id === id)
+      isNew = known === undefined
+      isResumed = known !== undefined && known.status !== 'running'
+      return addCard(cards, card)
+    })
     await update($, loops, l => listOf<Loop>(l).filter(x => x.id !== id))
-    await say($, shorten(cardTitle(card), 12), isResumed ? 'resumed' : `spawned · ${card.type}`, 'info', id)
+    if (isNew || isResumed) await say($, shorten(cardTitle(card), 12), isNew ? `spawned · ${card.type}` : 'resumed', 'info', id)
     await refreshStatus($, cfg)
     return started
   })
@@ -572,8 +595,8 @@ export const register: Register = (on, options) => {
           .map(normalizeCard)
           .map(c => (c.id === id ? { ...c, status, endedAt: now, answer: shorten(e.answer, 400) } : c)),
       )
-      const card = cards.find(c => c.id === id)
-      const took = card ? fmtDuration(now - card.spawnedAt) : ''
+      // This run's own length: a resumed agent's card clock also spans the idle time between runs.
+      const took = fmtDuration(e.durationMs)
       await say($, await whoIs($, id), status === 'done' ? `done · ${took}` : status, status === 'done' ? 'done' : 'error', id)
     } else {
       await update($, loops, l => listOf<Loop>(l).map(x => (x.id === id ? { ...x, isDone: true, lastAt: now } : x)))
@@ -585,10 +608,10 @@ export const register: Register = (on, options) => {
   // ---------------------------------------------------------------- drawing
 
   // After a surface module faults on a surface, this load draws it there as plain text; the other
-  // module, and other surfaces, keep theirs. Keyed `surface:rail.tsx`.
+  // module, and other surfaces, keep theirs. Keyed by faultKey: `desktop:rail.tsx`.
   const faulted = new Set<string>()
   on('ui.fault', async ($, e, next) => {
-    const key = `${e.surface}:${e.module.split('/').pop()}`
+    const key = faultKey(e.surface, e.module)
     if (e.requestId === PANE && !faulted.has(key)) {
       faulted.add(key)
       $.ui.log(`flightdeck: ${e.module} faulted on ${e.surface} (${e.phase}: ${e.reason}); drawing it without animation`)
@@ -601,8 +624,8 @@ export const register: Register = (on, options) => {
     const els = $.ui.resolve(e)
     const { Box, Text, Button } = els
     const hasClient = 'Client' in els
-    const hasRail = hasClient && !faulted.has(`${e.surface}:rail.tsx`)
-    const hasClock = hasClient && !faulted.has(`${e.surface}:elapsed.tsx`)
+    const hasRail = hasClient && !faulted.has(faultKey(e.surface, 'rail.tsx'))
+    const hasClock = hasClient && !faulted.has(faultKey(e.surface, 'elapsed.tsx'))
     const [m, u, a, g, cards, lp, lines, t, r, v, now] = await Promise.all([
       getMain($),
       getUsage($),

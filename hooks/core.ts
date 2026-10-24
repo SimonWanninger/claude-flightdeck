@@ -32,6 +32,7 @@ export const DEFAULT_USAGE: Usage = {
   window: 0,
   compactWindow: null,
   compactFor: 0,
+  compactMisses: 0,
   costUsd: null,
   limits: [],
   compactions: 0,
@@ -267,6 +268,39 @@ export const contextFill = (u: Pick<Usage, 'tokens' | 'window' | 'compactWindow'
   return { window, pct: u.tokens !== null && window > 0 ? (u.tokens * 100) / window : null }
 }
 
+/** Reads of the compaction window that may miss (no session bound yet) before a model window stops asking. */
+export const COMPACT_TRIES = 3
+
+/**
+ * A measurement of model window `window`: whether it reads the compaction window (not read for this
+ * window yet, fewer than COMPACT_TRIES misses), and the usage with that read claimed. A new window
+ * starts its misses afresh.
+ */
+export const claimCompactRead = (u: Usage, window: number): { usage: Usage; isClaimed: boolean } => {
+  const misses = u.window === window ? u.compactMisses : 0
+  const isClaimed = window > 0 && u.compactFor !== window && misses < COMPACT_TRIES
+  return { usage: { ...u, compactFor: isClaimed ? window : u.compactFor, compactMisses: misses }, isClaimed }
+}
+
+/**
+ * The usage after a compaction-window read for model window `window`. Dropped when a newer claim took
+ * its place (a model switch); a read that failed or came back with no breakdown is a miss, asked
+ * again at the next measurement.
+ */
+export const afterCompactRead = (
+  u: Usage,
+  window: number,
+  b: { rawMaxTokens: number; isAutoCompactEnabled: boolean } | null | undefined,
+): Usage =>
+  u.compactFor !== window
+    ? u
+    : b
+      ? { ...u, compactWindow: compactWindowOf(b, window), compactMisses: 0 }
+      : { ...u, compactWindow: null, compactFor: 0, compactMisses: u.compactMisses + 1 }
+
+/** A new main-loop model may compact in another window (`modelSettings`): read afresh at the next measurement. */
+export const forgetCompactRead = (u: Usage): Usage => ({ ...u, compactWindow: null, compactFor: 0, compactMisses: 0 })
+
 /** A gauge of `width` cells: ▰ filled, ▱ empty. */
 export const gauge = (pct: number, width: number) => {
   const full = Math.max(0, Math.min(width, Math.round((pct / 100) * width)))
@@ -455,6 +489,9 @@ export const applyStep = (c: AgentCard, s: { model: string; usage: StepUsage; st
 }
 
 export const noteTool = (c: AgentCard, n: ToolNote): AgentCard => ({ ...c, tools: [...c.tools, n].slice(-3) })
+
+/** A surface module's fault key, `desktop:rail.tsx`, from `hooks/rail.tsx` or `hooks\rail.tsx` alike. */
+export const faultKey = (surface: string, module: string) => `${surface}:${module.split(/[\\/]/).pop()}`
 
 /** A card whose agent was resumed after it finished (SendMessage): running again, its clock from its first spawn. */
 export const resumeCard = (c: AgentCard): AgentCard => ({ ...c, status: 'running', endedAt: null })

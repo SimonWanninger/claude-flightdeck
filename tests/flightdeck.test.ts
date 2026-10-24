@@ -6,7 +6,12 @@ import {
   DEFAULT_GATE,
   DEFAULT_TURN,
   DEFAULT_USAGE,
+  COMPACT_TRIES,
   addCard,
+  afterCompactRead,
+  claimCompactRead,
+  faultKey,
+  forgetCompactRead,
   resumeCard,
   afterCall,
   applyStep,
@@ -709,17 +714,17 @@ test('the gauge, status and inline summary measure against the compaction window
   await small.unmount()
 })
 
-const keepsModelWindow = (name: string, host: { compact: number | null; isEnabled?: boolean }) =>
+const keepsModelWindow = (name: string, host: { compact: number | null; isEnabled?: boolean }, asks: number) =>
   test(name, async ($, on) => {
     mock.clock(on)
     on('ui.status', () => ({ value: undefined }))
     on('session.measure', (_$, e) => ({ changed: e.changed }))
     const asked = compactHost(on, { window: () => 1_000_000, ...host })
-    for (const tokens of [100_000, 200_000, 300_000]) {
+    for (const tokens of [50_000, 100_000, 200_000, 250_000, 300_000]) {
       await $.session.measure({ context: { window: 1_000_000, tokens, percent: tokens / 10_000 }, rateLimits: [], changed: ['context'] })
     }
-    // Asked on the first measurement and not again, though it had nothing to report.
-    expect(asked.filter(Boolean).length).toBe(1)
+    // An answer is asked for once; no breakdown (no session bound yet) is asked again, COMPACT_TRIES in all.
+    expect(asked.filter(Boolean).length).toBe(asks)
     for (const cols of [40, 64, 120]) {
       const ui = await $.ui.mount({ ...pane(cols), surface: 'terminal' })
       expect(await ui.find({ text: /300k\/1\.0M/ })).toBeDefined()
@@ -728,8 +733,8 @@ const keepsModelWindow = (name: string, host: { compact: number | null; isEnable
     }
   })
 
-keepsModelWindow('a host that gives no breakdown keeps the model window and is asked only once', { compact: null })
-keepsModelWindow('with auto-compaction off the gauge keeps the model window', { compact: 400_000, isEnabled: false })
+keepsModelWindow('a host that gives no breakdown keeps the model window and stops asking after 3 tries', { compact: null }, 3)
+keepsModelWindow('with auto-compaction off the gauge keeps the model window and is asked once', { compact: 400_000, isEnabled: false }, 1)
 
 test('a resumed session reads its compaction window at start, and /clear leaves the reading alone', async ($, on) => {
   mock.clock(on)
@@ -780,4 +785,137 @@ test('a compaction-window read that fails is asked again at the next measurement
   expect(await read.find({ text: /300k\/400k/ })).toBeDefined()
   expect(await read.find({ text: / 75%/ })).toBeDefined()
   await read.unmount()
+})
+
+test('a compaction-window read is claimed once per model window, missed reads retried up to a cap, stale ones dropped', () => {
+  const b = { rawMaxTokens: 400_000, isAutoCompactEnabled: true }
+  const fresh = { ...DEFAULT_USAGE, window: 1_000_000 }
+  const first = claimCompactRead(fresh, 1_000_000)
+  expect([first.isClaimed, first.usage.compactFor]).toEqual([true, 1_000_000])
+  expect(claimCompactRead(first.usage, 1_000_000).isClaimed).toBe(false) // already claimed
+  expect(afterCompactRead(first.usage, 1_000_000, b).compactWindow).toBe(400_000)
+  // A read for a window no longer claimed (the model switched while it ran) changes nothing.
+  const switched = claimCompactRead({ ...first.usage, window: 1_000_000 }, 200_000).usage
+  expect(afterCompactRead(switched, 1_000_000, b)).toBe(switched)
+  // A miss (no breakdown, or a failed call) gives the claim back and counts; COMPACT_TRIES misses stop asking.
+  let u = first.usage
+  for (let i = 0; i < COMPACT_TRIES; i += 1) {
+    const c = claimCompactRead(u, 1_000_000)
+    expect(c.isClaimed || i === 0).toBe(true)
+    u = afterCompactRead(c.isClaimed ? c.usage : u, 1_000_000, i % 2 ? null : undefined)
+  }
+  expect([u.compactFor, u.compactMisses, u.compactWindow]).toEqual([0, COMPACT_TRIES, null])
+  expect(claimCompactRead(u, 1_000_000).isClaimed).toBe(false)
+  // Another model window, or another model, starts afresh.
+  expect(claimCompactRead(u, 200_000).isClaimed).toBe(true)
+  expect(claimCompactRead(forgetCompactRead({ ...u, compactWindow: 400_000 }), 1_000_000).isClaimed).toBe(true)
+  expect(forgetCompactRead({ ...u, compactWindow: 400_000 }).compactWindow).toBe(null)
+})
+
+test("a surface module's fault key is the same for the hook's path, either separator, and the drawing's name", () => {
+  expect(faultKey('desktop', 'hooks/rail.tsx')).toBe('desktop:rail.tsx')
+  expect(faultKey('desktop', 'hooks\\rail.tsx')).toBe(faultKey('desktop', 'rail.tsx'))
+  expect(faultKey('terminal', 'hooks/elapsed.tsx')).not.toBe(faultKey('desktop', 'hooks/elapsed.tsx'))
+})
+
+test('switching to another model with the same window reads its compaction window afresh', async ($, on) => {
+  mock.clock(on)
+  on('ui.status', () => ({ value: undefined }))
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  let compact = 400_000
+  let reads = 0
+  on('session.usage', (_$, e) => {
+    if (e.breakdown) reads += 1
+    const breakdown = e.breakdown ? { rawMaxTokens: compact, isAutoCompactEnabled: true } : undefined
+    return { value: { startedAt: 0, rateLimits: [], context: { window: 1_000_000, ...(breakdown ? { breakdown: breakdown as never } : {}) } } }
+  })
+  const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'x' }
+  on('turn.step', async function* () {
+    return { turnId: 'M1', index: 0, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage }
+  })
+  const step = async (model: string) => {
+    const s = $.turn.step({ turnId: 'M1', index: 0, model, messageCount: 1 })
+    for await (const _ of s) void _
+    await s.result
+  }
+  const measure = (tokens: number) =>
+    $.session.measure({ context: { window: 1_000_000, tokens, percent: tokens / 10_000 }, rateLimits: [], changed: ['context'] })
+  await step('claude-opus-5-5[1m]')
+  await measure(300_000)
+  await step('claude-opus-5-5[1m]')
+  await measure(360_000)
+  expect(reads).toBe(1) // the same model: not asked again
+  // Another 1M model whose own autoCompactWindow (modelSettings) is 700k.
+  compact = 700_000
+  await step('claude-sonnet-5-5[1m]')
+  await measure(360_000)
+  expect(reads).toBe(2)
+  const ui = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+  expect(await ui.find({ text: /360k\/700k/ })).toBeDefined()
+  expect(await ui.find({ text: / 51%/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a resume through agent.spawn logs once, whether its spawn or its first step lands first; "done" times the run', async ($, on) => {
+  const clock = mock.clock(on)
+  on('ui.status', () => ({ value: undefined }))
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  const usage = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'claude-sonnet-5-5' }
+  on('turn.step', async function* () {
+    return { turnId: 'R1', index: 0, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage }
+  })
+  const step = async () => {
+    const s = $.turn.step({ turnId: 'R1', index: 0, model: 'claude-sonnet-5-5', messageCount: 1, agentId: 'r1' })
+    for await (const _ of s) void _
+    await s.result
+  }
+  // A resumed agent may take its first step before its spawn's own hooks have finished.
+  let isStepFirst = false
+  on('agent.spawn', async (_$, e) => {
+    if (e.resume && isStepFirst) await step()
+    return { model: 'claude-sonnet-5-5', agentId: e.resume?.agentId ?? 'r1' }
+  })
+  const complete = (durationMs: number) =>
+    $.turn.complete({ answer: 'ok', durationMs, isAborted: false, turnId: 'R1', agentId: 'r1', reason: 'answer' })
+  const lines = async (re: RegExp) => {
+    const ui = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+    const n = (await ui.findAll({ text: re })).length
+    await ui.unmount()
+    return n
+  }
+  await $.turn.start({ text: 'go', turnId: 'T1' })
+  await $.agent.spawn(spawn('general-purpose', 'Audit the parser'))
+  await step()
+  await clock.advance(60_000)
+  await complete(60_000)
+  // Idle half an hour, then resumed: the spawn first, then its step.
+  await clock.advance(30 * 60_000)
+  await $.agent.spawn({ ...spawn('general-purpose', 'Audit it again'), resume: { agentId: 'r1' } })
+  await step()
+  expect(await lines(/^resumed$/)).toBe(1)
+  await clock.advance(90_000)
+  await complete(90_000)
+  // Resumed again, its first step landing inside the spawn.
+  isStepFirst = true
+  await $.agent.spawn({ ...spawn('general-purpose', 'And once more'), resume: { agentId: 'r1' } })
+  expect(await lines(/^resumed$/)).toBe(2)
+  expect(await lines(/^Audit the parser$/)).toBe(0) // one card, the latest task
+  // Each run timed on its own, not from the first spawn.
+  expect(await lines(/^done · 1m00s$/)).toBe(1)
+  expect(await lines(/^done · 1m30s$/)).toBe(1)
+})
+
+test("a subagent's turn start is its own: no prompt line, and the main turn keeps its count", async ($, on) => {
+  engine(on)
+  on('tool.call', () => ({ result: {}, text: 'ok' }))
+  await $.turn.start({ text: 'refactor it', turnId: 'T1' })
+  await $.tool.call({ tool: 'Edit', file_path: '/x.ts', old_string: 'a', new_string: 'b' } as never)
+  await $.turn.start({ text: 'Look at the parser again', turnId: 'A1', agentId: 'sub1' })
+  await $.turn.complete({ answer: '', durationMs: 1000, isAborted: false, turnId: 'T1', reason: 'answer' })
+  const ui = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+  expect(await ui.find({ text: /Look at the parser again/ })).toBeUndefined()
+  expect(await ui.find({ text: /refactor it/ })).toBeDefined()
+  expect(await ui.find({ text: /· 1 edit ·/ })).toBeDefined()
+  await ui.unmount()
 })

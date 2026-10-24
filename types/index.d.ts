@@ -25,6 +25,8 @@ export type Usage = {
   compactWindow: number | null
   /** The model window `compactWindow` was read for, so a model switch reads it again; 0 = not read yet. */
   compactFor: number
+  /** Reads for this model window that came back with no breakdown or failed; it stops asking at 3. */
+  compactMisses: number
   costUsd: number | null
   /** `resetsAt`: when the window resets, in ms since the epoch; null when the API gave no time,
    *  absent in state saved before it was kept. */
