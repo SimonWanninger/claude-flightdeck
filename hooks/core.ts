@@ -477,6 +477,13 @@ export const fitLegend = <T extends { label: string }>(items: T[], width: number
   return out
 }
 
+/**
+ * How many marks (■ ✗ ● ○ ✓) a row of `cells` columns holds. A terminal draws each mark in one
+ * cell; a graphical surface draws them wider (■ measured about 1.4 cells on the desktop app), so
+ * there a row holds fewer and its newest marks still show.
+ */
+export const marksIn = (cells: number, isTerminal: boolean) => (isTerminal ? cells : Math.floor(cells / 1.5))
+
 /** A card's title row: the task in the agent's own words, the type only when there is none. */
 export const cardTitle = (c: AgentCard) => c.description || c.type
 

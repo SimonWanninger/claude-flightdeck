@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { AgentCard, Architect, Bucket, Check, Gate, Layout, LogLine, Loop, Main, Roster, Turn, Usage, View } from '../types'
 import {
@@ -38,6 +38,7 @@ import {
   fmtSpeed,
   listOf,
   logRows,
+  marksIn,
   momentOf,
   normalize,
   normalizeCard,
@@ -599,6 +600,18 @@ export const register: Register = (on, options) => {
         <Text color={color}>{fmtTimer((endAt ?? now) - since)}</Text>
       )
 
+    const isTerminal = e.surface === 'terminal'
+    // A row of marks (gate checks, loop dots), sized by `marksIn`. Should a surface draw them wider
+    // still, the row is cut at its box rather than running past it.
+    const markRow = (marks: RenderChildren) => (
+      <Box overflow="hidden">
+        <Text wrap="truncate-start">{marks}</Text>
+      </Box>
+    )
+    // A terminal's border row stands apart from the text above it; a graphical surface draws the
+    // border flush against it, so the legend keeps one row of air there.
+    const legendGap = isTerminal ? 0 : 1
+
     // ---- main
     const effortN = { low: 1, medium: 2, high: 3, xhigh: 4, max: 4 }[m.effort] ?? 0
     const ctxGauge = u.pct !== null ? gauge(u.pct, 10) : null
@@ -655,6 +668,7 @@ export const register: Register = (on, options) => {
     // ---- architect
     const lastConsult = a.consults[a.consults.length - 1]
     const architectPanel = (w: number) => {
+      // Both ends are anchors (the first consult, now): should it run past its box, it asks to lose the middle.
       const tl = consultTimeline(a, now, Math.max(8, w - 4))
       return (
         <Box flexDirection="column" borderStyle="round" borderColor={C.arch} paddingX={1} width={w}>
@@ -669,7 +683,9 @@ export const register: Register = (on, options) => {
               </Text>
             </Text>
           </Box>
-          <Text color={C.arch}>{tl}</Text>
+          <Text color={C.arch} wrap="truncate-middle">
+            {tl}
+          </Text>
           {lastConsult ? (
             <Text dimColor wrap="truncate">
               {advising
@@ -705,8 +721,13 @@ export const register: Register = (on, options) => {
     const s = gateSummary(g)
     const verdictColor = (c: Check) =>
       c.verdict === 'rule' ? C.gate : c.verdict === 'cleared' ? C.cleared : c.verdict === 'ask' ? C.amber : C.warn
+    const checkMark = (c: Check) => (
+      <Text color={verdictColor(c)} dimColor={c.inSubagent}>
+        {c.verdict === 'deny' ? '✗' : '■'}
+      </Text>
+    )
     const gatePanel = (w: number) => {
-      const strip = g.recent.slice(-Math.max(8, w - 4))
+      const strip = g.recent.slice(-Math.max(8, marksIn(w - 4, isTerminal)))
       const open = v.gateOpen
       return (
         <Box flexDirection="column" borderStyle="round" borderColor={C.gate} paddingX={1} width={w}>
@@ -716,14 +737,7 @@ export const register: Register = (on, options) => {
             </Text>
             <Text dimColor>{`${s.total} checks`}</Text>
           </Box>
-          <Box>
-            {strip.length === 0 ? <Text color={C.faint}>no checks yet</Text> : null}
-            {strip.map(c => (
-              <Text color={verdictColor(c)} dimColor={c.inSubagent}>
-                {c.verdict === 'deny' ? '✗' : '■'}
-              </Text>
-            ))}
-          </Box>
+          {strip.length === 0 ? <Text color={C.faint}>no checks yet</Text> : markRow(strip.map(checkMark))}
           <Text wrap="truncate">
             <Text color={C.gate}>■</Text>
             <Text dimColor>{` ${s.rule} allowed  `}</Text>
@@ -887,14 +901,16 @@ export const register: Register = (on, options) => {
     const loopsPanel = (w: number) => {
       if (lp.length === 0) return null
       const active = lp.filter(l => isLoopActive(l, now)).length
-      const dots = lp.slice(-Math.max(4, w - 38))
+      const dots = lp.slice(-Math.max(4, marksIn(w - 38, isTerminal)))
       return (
         <Box width={w}>
           <Text bold>other loops </Text>
           <Text dimColor>{`${lp.length} seen · ${active} active  `}</Text>
-          {dots.map(l => (
-            <Text color={isLoopActive(l, now) ? C.agent : l.isDone ? C.dim : C.faint}>{isLoopActive(l, now) ? '●' : l.isDone ? '✓' : '○'}</Text>
-          ))}
+          {markRow(
+            dots.map(l => (
+              <Text color={isLoopActive(l, now) ? C.agent : l.isDone ? C.dim : C.faint}>{isLoopActive(l, now) ? '●' : l.isDone ? '✓' : '○'}</Text>
+            )),
+          )}
         </Box>
       )
     }
@@ -925,8 +941,8 @@ export const register: Register = (on, options) => {
     }
 
     // ---- log: whatever rows the other panels leave, 4 to 8
-    // The main box's speed line and the gap above the log are a row each.
-    const used = 2 + 5 + (m.speed ? 1 : 0) + 1 + (showArchitect ? 6 : 0) + 6 + (v.gateOpen ? 5 : 0) + (cards.length > cfg.maxCards ? 3 + Math.min(6, cards.length) : 8) + (expandedCard ? 8 : 0) + (lp.length ? 1 : 0) + 3
+    // The main box's speed line, the legend's gap and the gap above the log are a row each.
+    const used = 2 + legendGap + 5 + (m.speed ? 1 : 0) + 1 + (showArchitect ? 6 : 0) + 6 + (v.gateOpen ? 5 : 0) + (cards.length > cfg.maxCards ? 3 + Math.min(6, cards.length) : 8) + (expandedCard ? 8 : 0) + (lp.length ? 1 : 0) + 3
     const bodyRows = e.props.scroll?.bodyRows ?? e.viewport?.rows ?? 40
     const nLog = logRows(bodyRows, used)
     const shownLines = (viewed ? lines.filter(l => l.agentId === viewed) : lines).slice(-nLog)
@@ -1025,7 +1041,7 @@ export const register: Register = (on, options) => {
     if (isMini) {
       const live = [...cards.filter(c => c.status === 'running'), ...cards.filter(c => c.status !== 'running').reverse()].slice(0, 3)
       const counts = ` ${s.rule} allowed · ${s.cleared} ${decider}${s.ask > 0 ? ` · ${s.ask} pending` : ''} · ${s.deny} denied`
-      const strip = g.recent.slice(-Math.max(4, W - cfg.gateLabel.length - 1 - counts.length))
+      const strip = g.recent.slice(-Math.max(4, marksIn(W - cfg.gateLabel.length - 1 - counts.length, isTerminal)))
       const mg = u.pct !== null ? gauge(u.pct, 6) : null
       return (
         <Box flexDirection="column" width={W}>
@@ -1045,11 +1061,7 @@ export const register: Register = (on, options) => {
           {strip.length > 0 ? (
             <Box>
               <Text dimColor>{`${cfg.gateLabel.toLowerCase()} `}</Text>
-              {strip.map(c => (
-                <Text color={verdictColor(c)} dimColor={c.inSubagent}>
-                  {c.verdict === 'deny' ? '✗' : '■'}
-                </Text>
-              ))}
+              {markRow(strip.map(checkMark))}
               <Text color={s.deny > 0 ? C.warn : s.ask > 0 ? C.amber : C.dim} wrap="truncate">
                 {counts}
               </Text>
@@ -1113,7 +1125,7 @@ export const register: Register = (on, options) => {
             {showArchitect ? <Text>{advising ? ' ADVISING' : ' ON CALL'}</Text> : null}
           </Text>
         </Box>
-        <Box justifyContent="center" columnGap={2}>
+        <Box key="legend" justifyContent="center" columnGap={2} marginBottom={legendGap}>
           {legend.map(l => (
             <Text>
               <Text color={l.color}>■</Text>
