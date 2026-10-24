@@ -128,12 +128,15 @@ test("a card's context is its latest step's whole input; output adds up", () => 
 })
 
 test('a resumed agent runs again on its own card instead of adding a second', () => {
-  const a = { ...normalizeCard({ id: 'a', description: 'first', spawnedAt: 5 }), status: 'done' as const, endedAt: 100, steps: 4, out: 900 }
+  const a = { ...normalizeCard({ id: 'a', description: 'first', spawnedAt: 5, model: 'claude-sonnet-5-5' }), status: 'done' as const, endedAt: 100, steps: 4, out: 900 }
   const b = normalizeCard({ id: 'b' })
   const cards = addCard(addCard(addCard([], a), b), { ...normalizeCard({ id: 'a', description: 'again', spawnedAt: 200 }) })
   expect(cards.map(c => `${c.id}:${c.description}`)).toEqual(['a:again', 'b:'])
   expect(cards[0] && [cards[0].status, cards[0].endedAt, cards[0].steps, cards[0].out, cards[0].spawnedAt]).toEqual(['running', null, 4, 900, 5])
   expect([resumeCard(a).status, resumeCard(a).endedAt]).toEqual(['running', null])
+  // Spawned again on another model, the card names it; a spawn that names none keeps the card's.
+  expect(addCard([a], normalizeCard({ id: 'a', model: 'claude-opus-5-5' }))[0]?.model).toBe('claude-opus-5-5')
+  expect(addCard([a], normalizeCard({ id: 'a' }))[0]?.model).toBe('claude-sonnet-5-5')
 })
 
 test('consults open, close by id, and draw on a shared timeline', () => {
@@ -752,4 +755,29 @@ test('a resumed session reads its compaction window at start, and /clear leaves 
   expect(await cleared.find({ text: /100k\/400k/ })).toBeDefined()
   expect(await cleared.find({ text: / 25%/ })).toBeDefined()
   await cleared.unmount()
+})
+
+test('a compaction-window read that fails is asked again at the next measurement', async ($, on) => {
+  mock.clock(on)
+  on('ui.status', () => ({ value: undefined }))
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  let reads = 0
+  on('session.usage', (_$, e) => {
+    if (e.breakdown && ++reads === 1) return { deny: 'not bound yet' }
+    const breakdown = e.breakdown ? { rawMaxTokens: 400_000, isAutoCompactEnabled: true } : undefined
+    return { value: { startedAt: 0, rateLimits: [], context: { window: 1_000_000, ...(breakdown ? { breakdown: breakdown as never } : {}) } } }
+  })
+  const measure = (tokens: number) =>
+    $.session.measure({ context: { window: 1_000_000, tokens, percent: tokens / 10_000 }, rateLimits: [], changed: ['context'] })
+  await measure(100_000)
+  const failed = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+  expect(await failed.find({ text: /100k\/1\.0M/ })).toBeDefined()
+  await failed.unmount()
+  await measure(200_000)
+  await measure(300_000)
+  expect(reads).toBe(2) // the failed read once more, then not again
+  const read = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+  expect(await read.find({ text: /300k\/400k/ })).toBeDefined()
+  expect(await read.find({ text: / 75%/ })).toBeDefined()
+  await read.unmount()
 })

@@ -461,11 +461,11 @@ export const resumeCard = (c: AgentCard): AgentCard => ({ ...c, status: 'running
 
 /**
  * A spawned card joins the list. An id already there is that agent resumed: its card runs again
- * where it stands, with its tallies and the new task, so no two cards share keys.
+ * where it stands, with its tallies and the new task and model, so no two cards share keys.
  */
 export const addCard = (cards: AgentCard[], card: AgentCard): AgentCard[] =>
   cards.some(c => c.id === card.id)
-    ? cards.map(c => (c.id === card.id ? resumeCard({ ...c, description: card.description || c.description }) : c))
+    ? cards.map(c => (c.id === card.id ? resumeCard({ ...c, description: card.description || c.description, model: card.model || c.model }) : c))
     : [...cards, card].slice(-24)
 
 export const stepLoop = (loops: Loop[], id: string, at: number): Loop[] => {

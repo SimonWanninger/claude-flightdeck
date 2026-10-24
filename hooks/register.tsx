@@ -210,14 +210,14 @@ async function resetAll($: EngineInterface) {
 /**
  * Stores the compaction window for the model window `window`. A `summary` breakdown estimates locally
  * and sends no request; where the host gives none, the gauge stays on the model's window. Dropped when
- * the model changed again while it was read.
+ * the model changed again while it was read; a call that failed is asked again at the next measurement.
  */
 async function readCompactWindow($: EngineInterface, window: number) {
   const r = await $.session.usage({ breakdown: 'summary' }).catch(() => null)
   const compactWindow = compactWindowOf(r?.context.breakdown, window)
   await update($, usage, x => {
     const u = normalize(DEFAULT_USAGE, x)
-    return u.compactFor === window ? { ...u, compactWindow } : u
+    return u.compactFor !== window ? u : r === null ? { ...u, compactWindow: null, compactFor: 0 } : { ...u, compactWindow }
   })
 }
 
