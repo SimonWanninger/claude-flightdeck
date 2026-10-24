@@ -238,22 +238,14 @@ export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' :
 export const fmtUsd = (n: number) => (n >= 100 ? `$${Math.round(n)}` : `$${n.toFixed(2)}`)
 
 /**
- * How fast a request answered, from three readings of the clock: when it was sent, when its first
- * piece of response arrived, and when it stopped. Null when no response came. `tokPerS` is null
- * when there is no usage or no time between the first piece and the stop to divide by.
+ * How soon a request began to answer: from when it was sent to its first piece of response; null when
+ * none came. No output rate: the reported tokens include thinking, which may arrive unstreamed before
+ * that first piece, so tokens over the visible stream read in the thousands per second.
  */
-export const stepSpeed = (sentAt: number, firstAt: number | null, stopAt: number, outTokens: number | null) => {
-  if (firstAt === null) return null
-  const decodeMs = stopAt - firstAt
-  return {
-    ttftMs: Math.max(0, firstAt - sentAt),
-    tokPerS: outTokens !== null && outTokens > 0 && decodeMs > 0 ? (outTokens * 1000) / decodeMs : null,
-  }
-}
+export const stepSpeed = (sentAt: number, firstAt: number | null) => (firstAt === null ? null : { ttftMs: Math.max(0, firstAt - sentAt) })
 
-/** `ttft 0.8s · 42 tok/s`; the rate is left off when it is unknown. */
-export const fmtSpeed = (s: { ttftMs: number; tokPerS: number | null }) =>
-  `ttft ${(s.ttftMs / 1000).toFixed(1)}s` + (s.tokPerS !== null ? ` · ${Math.round(s.tokPerS)} tok/s` : '')
+/** `ttft 0.8s`. */
+export const fmtSpeed = (s: { ttftMs: number }) => `ttft ${(s.ttftMs / 1000).toFixed(1)}s`
 
 /** The compaction window a context breakdown reports: its `rawMaxTokens` when auto-compaction is on and that is smaller than the model's `window`; else null. */
 export const compactWindowOf = (b: { rawMaxTokens: number; isAutoCompactEnabled: boolean } | null | undefined, window: number): number | null =>

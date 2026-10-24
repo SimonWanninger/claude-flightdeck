@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- The main box's `last req` line shows only the time to first token. Its tokens per second divided the reported output tokens, which include thinking, by the time from the first streamed piece, so when thinking wasn't streamed it read thousands of tokens a second. It is gone rather than wrong.
+- On the desktop app the connector between panels no longer jitters at its right end while work runs. It is drawn in the surface's monospaced face, where its dashes and moving dot are each one cell, and clipped at its width. In a terminal it looks the same.
+
 ## 0.5.0
 
 - The context gauge, its `tokens/window` and the status line's `ctx N%` measure against the compaction window when the session compacts in a smaller one than the model's, whether `autoCompactWindow` (global or per model) or Claude Code sets it. Auto-compaction runs a little before 100%, and the figure reads higher than Claude Code's own status-line percentage, which measures against the model's window. The window comes from a local `summary` breakdown (no request sent), read once per model. ([#9](https://github.com/scasella/claude-flightdeck/issues/9), thanks @DrWBlow)
