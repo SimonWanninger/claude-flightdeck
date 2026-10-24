@@ -148,11 +148,12 @@ test('consults open, close by id, and draw on a shared timeline', () => {
 
 test('config is read leniently: bad values fall back to defaults', () => {
   const d = parseConfig({})
-  expect([d.maxCards, d.layout, d.motion, d.moments, d.panels.length]).toEqual([3, 'auto', true, true, 7])
+  expect([d.maxCards, d.paneColumns, d.layout, d.motion, d.moments, d.panels.length]).toEqual([3, 66, 'auto', true, true, 7])
   expect(d.architect.test('fable-advisor:fable-advisor')).toBe(true)
   const c = parseConfig({ architectPattern: '([', maxCards: 99, layout: 'diagonal', panels: 'log, gate ,nope,gate', motion: 'off' })
   expect(c.architect.test('advisor')).toBe(true) // invalid regex → default
   expect([c.maxCards, c.layout, c.motion]).toEqual([6, 'auto', false])
+  expect([46.4, 12, Number.NaN, '90'].map(n => parseConfig({ paneColumns: n }).paneColumns)).toEqual([46, 40, 66, 66])
   expect(c.panels).toEqual(['log', 'gate'])
 })
 
@@ -605,4 +606,14 @@ test('a finished agent that takes another step (resumed by SendMessage) runs aga
   expect(await ui.find({ text: /^resumed$/ })).toBeDefined()
   expect(await ui.find({ text: /ctx 10 · out 10 · 2 st/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('the docked pane asks for the width set in paneColumns', { options: { paneColumns: 46 } }, async ($, on) => {
+  engine(on)
+  const asked: (number | undefined)[] = []
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', (_$, e) => ({ value: { command: e.name } }))
+  on('ui.open', (_$, e) => (asked.push(e.columns), { value: { isPlaced: true as const } }))
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+  expect(asked).toEqual([46])
 })

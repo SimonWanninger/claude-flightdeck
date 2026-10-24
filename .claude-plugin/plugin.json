@@ -73,6 +73,12 @@
       "type": "number",
       "default": 3
     },
+    "paneColumns": {
+      "title": "Pane width",
+      "description": "Columns the pane asks for when docked beside a fullscreen transcript, 40 or more. A width you drag the dock to wins.",
+      "type": "number",
+      "default": 66
+    },
     "layout": {
       "title": "Layout",
       "description": "auto: a summary of at most 8 rows when the pane sits inline above the prompt, two columns from 110 columns when docked, one column otherwise",

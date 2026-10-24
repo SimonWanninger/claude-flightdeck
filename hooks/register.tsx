@@ -66,7 +66,6 @@ import type { Config, Panel } from './core'
 
 const PANE = 'flightdeck'
 const TITLE = 'Flightdeck'
-const PANE_COLUMNS = 66
 
 
 // ---------------------------------------------------------------- state
@@ -186,9 +185,9 @@ async function isArchitectType($: EngineInterface, cfg: Config, type: string) {
   return cfg.architect.test(type) || (await getRoster($)).architectTypes.includes(type)
 }
 
-async function openPane($: EngineInterface) {
+async function openPane($: EngineInterface, cfg: Config) {
   // columns apply when docked beside the transcript, rows when seated inline above the prompt.
-  return $.ui.open({ id: PANE, title: TITLE, columns: PANE_COLUMNS, rows: 8 })
+  return $.ui.open({ id: PANE, title: TITLE, columns: cfg.paneColumns, rows: 8 })
 }
 
 async function resetAll($: EngineInterface) {
@@ -242,7 +241,7 @@ export const register: Register = (on, options) => {
         limits: u.rateLimits.map(limitOf),
       }))
     }
-    if (cfg.openOnStart) void openPane($).catch(() => undefined)
+    if (cfg.openOnStart) void openPane($, cfg).catch(() => undefined)
     await refreshStatus($, cfg)
     return next(e)
   })
@@ -270,10 +269,10 @@ export const register: Register = (on, options) => {
       const layout: Layout | null = arg === 'compact' || arg === 'wide' || arg === 'auto' || arg === 'mini' ? arg : null
       if (!layout) return { text: 'Usage: /flightdeck layout auto|compact|wide|mini' }
       await update($, view, v => ({ ...normalize(DEFAULT_VIEW, v), layout }))
-      const opened = await openPane($)
+      const opened = await openPane($, cfg)
       return { text: opened.isPlaced ? `Flightdeck layout: ${layout}.` : `Layout set to ${layout}; the pane is not shown yet: ${opened.reason}` }
     }
-    const opened = await openPane($)
+    const opened = await openPane($, cfg)
     if (!opened.isPlaced) return { text: `Flightdeck is not shown yet: ${opened.reason}` }
     return { text: 'Flightdeck opened. Focus it with ctrl+x tab; 1-6 expand cards, f/s/o open the gate rows.' }
   })

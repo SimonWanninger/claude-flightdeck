@@ -122,7 +122,7 @@ What it keeps: short summaries (a tool name plus a path or command, with credent
 
 ## Configure
 
-In `/config`, or under `pluginConfigs["flightdeck"].options` in `settings.json`:
+In `/config`, with `claude plugin configure flightdeck@claude-flightdeck` from a terminal, or under `pluginConfigs["flightdeck@claude-flightdeck"].options` in your user `settings.json`. The key is the plugin's full id, and project settings are not read: an entry under `"flightdeck"`, or in `.claude/settings.json`, is ignored without a warning.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -133,6 +133,7 @@ In `/config`, or under `pluginConfigs["flightdeck"].options` in `settings.json`:
 | `panels` | `main,architect,gate,agents,loops,receipt,log` | which panels show, in order |
 | `layout` | `auto` | `mini`, `compact`, `wide`, or `auto` (mini inline, wide from 110 columns docked) |
 | `maxCards` | `3` | cards side by side before swimlanes (1–6); fewer if the pane is too narrow |
+| `paneColumns` | `66` | columns the pane asks for when docked beside a fullscreen transcript, 40 or more; a width you drag the dock to wins |
 | `motion` | `while-active` | `off` keeps connectors still |
 | `moments` | `true` | show the inferred consult moments |
 | `palette` | `theme` | `pastel` uses fixed colours tuned for dark terminals |
@@ -145,6 +146,10 @@ In `/config`, or under `pluginConfigs["flightdeck"].options` in `settings.json`:
 - Check `claude --version` is 2.1.287 or later, then run `/reload-plugins` and `/flightdeck`.
 - Below 144 columns, Claude Code won't seat a pane nobody asked for; `/flightdeck` opens it at any width.
 - Look in the transcript for a dim line starting `flightdeck:`. It names the hook that failed or the reason the pane was refused. Please [open an issue](https://github.com/scasella/claude-flightdeck/issues) with it.
+
+**Nothing shows in the VS Code extension.** Its 2.1.296 build runs mod hooks but shows no mod pane, Flightdeck's or any other mod's ([#5](https://github.com/scasella/claude-flightdeck/issues/5)). Run `claude` in VS Code's integrated terminal instead.
+
+**Options seem ignored.** Check the key: `pluginConfigs["flightdeck@claude-flightdeck"]`, in your user `settings.json`. See [Configure](#configure).
 
 **Colours look wrong.** Set `palette` to `pastel` in `/config`.
 
