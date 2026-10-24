@@ -30,6 +30,8 @@ export const DEFAULT_USAGE: Usage = {
   pct: null,
   tokens: null,
   window: 0,
+  compactWindow: null,
+  compactFor: 0,
   costUsd: null,
   limits: [],
   compactions: 0,
@@ -251,6 +253,19 @@ export const stepSpeed = (sentAt: number, firstAt: number | null, stopAt: number
 /** `ttft 0.8s · 42 tok/s`; the rate is left off when it is unknown. */
 export const fmtSpeed = (s: { ttftMs: number; tokPerS: number | null }) =>
   `ttft ${(s.ttftMs / 1000).toFixed(1)}s` + (s.tokPerS !== null ? ` · ${Math.round(s.tokPerS)} tok/s` : '')
+
+/** The compaction window a context breakdown reports: its `rawMaxTokens` when auto-compaction is on and that is smaller than the model's `window`; else null. */
+export const compactWindowOf = (b: { rawMaxTokens: number; isAutoCompactEnabled: boolean } | null | undefined, window: number): number | null =>
+  b && b.isAutoCompactEnabled && b.rawMaxTokens > 0 && b.rawMaxTokens < window ? b.rawMaxTokens : null
+
+/**
+ * What the context gauge measures: the compaction window when one is set smaller than the model's,
+ * else the model's window, and the fill of it from the real `tokens` reading. No gauge (null) without one.
+ */
+export const contextFill = (u: Pick<Usage, 'tokens' | 'window' | 'compactWindow'>): { pct: number | null; window: number } => {
+  const window = u.compactWindow !== null && u.compactWindow > 0 && u.compactWindow < u.window ? u.compactWindow : u.window
+  return { window, pct: u.tokens !== null && window > 0 ? (u.tokens * 100) / window : null }
+}
 
 /** A gauge of `width` cells: ▰ filled, ▱ empty. */
 export const gauge = (pct: number, width: number) => {
