@@ -92,7 +92,7 @@ Focus the pane with `ctrl+x tab`, then:
 
 - **Fullscreen terminal:** docked beside the transcript; two columns from 110 columns wide.
 - **Main-screen terminal:** inline above the prompt, as the 8-row summary.
-- **Desktop app, VS Code, mobile:** the same panels, plus the agents drawn as an SVG time axis. VS Code and mobile can't animate, so connectors and clocks are static there.
+- **Desktop app, VS Code, mobile:** the same panels, plus the agents drawn as an SVG time axis. VS Code and mobile can't animate, so connectors and clocks are static there. (The VS Code extension may show no pane at all yet: see [Troubleshooting](#troubleshooting).)
 
 With `openOnStart`, the pane opens by itself when a session starts, in terminals at least 144 columns wide; below that, `/flightdeck` opens it. Colours come from your Claude Code theme, so light, dark and colour-blind themes all read.
 
@@ -107,6 +107,7 @@ Flightdeck only watches. Every hook passes its event on unchanged: it never deni
 | subagent spawns, their model requests and token usage, and their final answers | `agent.spawn`, `turn.step`, `turn.complete` |
 | your prompts' first 70 characters, for the log | `turn.start` |
 | context, cost and rate-limit readings | `session.measure`, `$.session.usage()` |
+| the compaction window: it keeps only that number and whether auto-compaction is on, from a breakdown estimated locally, once per model window | `$.session.usage({ breakdown: 'summary' })` |
 | advisor tool calls in the assistant's responses (their content is encrypted) | `session.append` |
 
 What it keeps: short summaries (a tool name plus a path or command, with credentials masked) in session state, which ends with the session. It makes **no** network requests, runs no processes, reads and writes no files, stores nothing across sessions, and calls no model. `claude plugin validate .` prints exactly what it hooks and calls.
