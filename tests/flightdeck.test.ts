@@ -9,6 +9,8 @@ import {
   DEFAULT_USAGE,
   COMPACT_TRIES,
   addCard,
+  cellWidth,
+  piecesThatFit,
   afterCompactRead,
   claimCompactRead,
   faultKey,
@@ -921,6 +923,12 @@ test("a subagent's turn start is its own: no prompt line, and the main turn keep
   await ui.unmount()
 })
 
+test('a line keeps the pieces that fit, in order, counting each lead and the gaps between them', () => {
+  const pieces = [{ width: 5 }, { width: 5, lead: 2 }, { width: 3 }]
+  expect([piecesThatFit(pieces, 13, 1), piecesThatFit(pieces, 12, 1), piecesThatFit(pieces, 17, 1), piecesThatFit(pieces, 4, 1)]).toEqual([2, 1, 3, 0])
+  expect([cellWidth('■ ▰▱ 48%'), cellWidth('')]).toEqual([8, 0])
+})
+
 // ---------------------------------------------------------------- width check
 
 // The kit lays nothing out, so this measures the drawn tree as a row layout would: the fewest cells
@@ -951,11 +959,33 @@ const needs = (n: unknown, out: string[], path: string): number => {
       ? Math.max(0, ...inner)
       : inner.reduce((a, b) => a + b, 0) + spaceOf(p.columnGap ?? p.gap) * Math.max(0, inner.length - 1)
   const need = content + (p.borderStyle ? 2 : 0) + 2 * spaceOf(p.paddingX ?? p.padding)
+  const margin = spaceOf(p.marginLeft) + spaceOf(p.marginRight) + 2 * spaceOf(p.marginX)
+  // A Box with a width must hold its contents, clipping or not; one without clips to nothing if it may.
   if (typeof p.width === 'number') {
-    if (need > p.width && p.overflow !== 'hidden') out.push(`${here}: needs ${need} in ${p.width}`)
-    return p.width
+    if (need > p.width) out.push(`${here}: needs ${need} in ${p.width}`)
+    return p.width + margin
   }
-  return p.overflow === 'hidden' ? 0 : need
+  return (p.overflow === 'hidden' ? 0 : need) + margin
+}
+
+/**
+ * What a graphical surface needs of a line of text: no `truncate` Text nests Texts (the desktop app wraps the
+ * nested pieces, or lays truncating ones out as blocks of their own), and no Text placed in a Box starts or
+ * ends with a space (it collapses spaces, so a gap between pieces is the Box's, not the text's).
+ */
+const desktopFaults = (n: unknown, out: string[], path = '', parent = ''): string[] => {
+  if (!isDrawn(n)) return out
+  const p = n.props ?? {}
+  const here = `${path}/${String(p.key ?? n.type)}`
+  const kids = (n.children ?? []).filter(isDrawn)
+  if (n.type === 'Text') {
+    const text = textOf(n)
+    if (p.wrap === 'truncate' && kids.some(k => k.type === 'Text')) out.push(`${here}: truncates nested Texts "${text}"`)
+    if (parent === 'Box' && text !== text.trim()) out.push(`${here}: edge spaces "${text}"`)
+    return out
+  }
+  kids.forEach((k, i) => desktopFaults(k, out, `${here}[${i}]`, n.type))
+  return out
 }
 const spillsOf = (tree: unknown, columns: number) => {
   const out: string[] = []
@@ -1001,7 +1031,7 @@ const busySession = async ($: Parameters<TestBody>[0], on: On) => {
     { tool: 'WebFetch', input: { url: 'https://example.com/a/very/long/documentation/path/for/the/loader' } },
   ]
   for (let i = 0; i < 60; i += 1) await $.tool.check({ ...tools[i % 3]!, tool_use_id: `k${i}` })
-  await $.tool.call({ tool: 'Edit', file_path: '/x/loader.ts', old_string: 'a', new_string: 'b' } as never)
+  await $.tool.call({ tool: 'Edit', file_path: '/x/loader.ts', old_string: 'a', new_string: 'b', tool_use_id: 'edit1' } as never)
   await $.agent.spawn(spawn('fable-advisor:fable-advisor', 'final review of the loader'))
   await $.turn.complete({
     answer: 'Ship it once the configuration loader keeps its public names and the migration test covers the old shape',
@@ -1017,7 +1047,7 @@ const busySession = async ($: Parameters<TestBody>[0], on: On) => {
   return clock
 }
 
-test('every panel fits the pane at every width from 24 columns, on every surface and placement', { timeoutMs: 60_000 }, async ($, on) => {
+test('every panel fits the pane at every width from 24 columns, on every surface and placement, in lines a graphical surface keeps whole', { timeoutMs: 60_000 }, async ($, on) => {
   await busySession($, on)
   const failures: string[] = []
   const check = async (label: string) => {
@@ -1044,6 +1074,15 @@ test('every panel fits the pane at every width from 24 columns, on every surface
   await opener.unmount()
   await $.turn.start({ text: 'and once more', turnId: 'B2' })
   await check('drill-down, expanded, running')
+  for (const surface of ['terminal', 'desktop'] as const) {
+    for (const cols of [24, 32, 40, 64, 120]) {
+      for (const placement of ['dock', 'inline'] as const) {
+        const ui = await $.ui.mount({ ...pane(cols), props: { ...pane(cols).props, placement }, surface })
+        for (const f of desktopFaults(await ui.drawn(), [])) failures.push(`${surface} ${placement} ${cols}: ${f}`)
+        await ui.unmount()
+      }
+    }
+  }
   // One line per panel and width that spills, the surface left out (they draw the same boxes).
   expect([...new Set(failures.map(f => f.replace(/ (terminal|desktop|vscode|mobile) /, ' ')))]).toEqual([])
 })
