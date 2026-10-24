@@ -1108,3 +1108,36 @@ test('a single agent card fits from 24 columns, and the time axis scales to the 
   }
   expect(failures).toEqual([])
 })
+
+test('a running connector keeps its length every frame: one face, clipped at its width, the dot still moving', async ($, on) => {
+  engine(on)
+  on('tool.check', () => ({ decision: 'allow' }))
+  await $.tool.check({ tool: 'Read', input: { file_path: '/a' }, tool_use_id: 'r1' })
+  await $.turn.start({ text: 'go', turnId: 'R1' }) // a turn running: the connectors animate
+  for (const surface of ['desktop', 'terminal'] as const) {
+    const ui = await $.ui.mount({ ...pane(64), surface })
+    expect((await ui.find({ key: 'link-gate' }))?.type).toBe('Client')
+    const heads = new Set<number>()
+    for (let frame = 0; frame < 30; frame += 1) {
+      const tree = (await ui.drawn({ in: 'link-gate' })) as Drawn
+      const texts: Drawn[] = []
+      const walk = (n: unknown) => {
+        if (!isDrawn(n)) return
+        if (n.type === 'Text') texts.push(n)
+        else (n.children ?? []).forEach(walk)
+      }
+      walk(tree)
+      const line = texts.map(textOf).join('')
+      // The box is the line's width and clips; its text is that width and four spare cells, every frame.
+      expect([tree.type, tree.props?.width, tree.props?.overflow]).toEqual(['Box', 64, 'hidden'])
+      expect(cellsOf(line)).toBe(64 + 4)
+      expect(texts.every(t => t.props?.mono === true)).toBe(true)
+      expect(/^[─●•┬┴]+$/.test(line)).toBe(true)
+      const head = [...line].slice(0, 64).indexOf('●')
+      if (head >= 0) heads.add(head)
+      await ui.advance(110)
+    }
+    expect(heads.size > 5).toBe(true) // the dot travels along the line
+    await ui.unmount()
+  }
+})

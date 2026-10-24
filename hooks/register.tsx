@@ -674,7 +674,9 @@ export const register: Register = (on, options) => {
           props={{ active, width, color, dim: C.faint, marks, isMerge }}
         />
       ) : (
-        <Text color={C.faint}>{'─'.repeat(Math.max(1, width))}</Text>
+        <Text color={C.faint} mono>
+          {'─'.repeat(Math.max(1, width))}
+        </Text>
       )
 
     // A start time of 0 is unknown (state saved before it was recorded): no clock, not decades.
