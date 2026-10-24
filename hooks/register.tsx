@@ -350,19 +350,17 @@ export const register: Register = (on, options) => {
         return { ...x, model: e.model, effort: String(e.effort ?? x.effort), steps: x.steps + 1 }
       })
       if (isNewModel) await update($, usage, x => forgetCompactRead(normalize(DEFAULT_USAGE, x)))
-      // Time the response as it passes: the first piece that is not the engine's envelope, then the
-      // stop chunk. Two clock reads in the stream and nothing stored until it has ended.
+      // Time the response as it passes: its first piece that is neither the engine's envelope nor the
+      // stop. One clock read in the stream and nothing stored until it has ended.
       const sentAt = await $.clock.now()
       let firstAt: number | null = null
-      let stopAt: number | null = null
       const s = next(e)
       for await (const c of s) {
-        if (c.kind === 'stop') stopAt = await $.clock.now()
-        else if (firstAt === null && c.kind !== 'engine') firstAt = await $.clock.now()
+        if (firstAt === null && c.kind !== 'engine' && c.kind !== 'stop') firstAt = await $.clock.now()
         yield c
       }
       const result = await s.result
-      const speed = result.usage && stopAt !== null ? stepSpeed(sentAt, firstAt, stopAt, result.usage.output_tokens) : null
+      const speed = result.usage ? stepSpeed(sentAt, firstAt) : null
       if (speed) await update($, main, m => ({ ...normalize(DEFAULT_MAIN, m), speed }))
       return result
     }

@@ -214,13 +214,12 @@ test('layout math: lanes share one axis, the log gets 4-8 rows, the legend never
   expect(receiptOf({ ...DEFAULT_TURN, costAtStart: 1, edits: 2 }, { durationMs: 1000, agentsSince: 3, costNow: 1.5, reason: 'answer' }).costDelta).toBe(0.5)
 })
 
-test('a request\'s speed: time to its first piece, then output tokens per second to the stop', () => {
-  expect(stepSpeed(1000, 1800, 3800, 120)).toEqual({ ttftMs: 800, tokPerS: 60 })
-  expect(stepSpeed(1000, null, 3800, 120)).toBe(null) // no response arrived
-  expect(stepSpeed(1000, 1800, 1800, 120)?.tokPerS).toBe(null) // nothing to divide by
-  expect(stepSpeed(1000, 1800, 3800, null)?.tokPerS).toBe(null)
-  expect(fmtSpeed({ ttftMs: 800, tokPerS: 60.4 })).toBe('ttft 0.8s · 60 tok/s')
-  expect(fmtSpeed({ ttftMs: 1250, tokPerS: null })).toBe('ttft 1.3s')
+test('a request\'s speed is its time to the first piece of response, and no output rate', () => {
+  expect(stepSpeed(1000, 1800)).toEqual({ ttftMs: 800 })
+  expect(stepSpeed(1000, null)).toBe(null) // no response arrived
+  expect(fmtSpeed({ ttftMs: 1250 })).toBe('ttft 1.3s')
+  // State saved by 0.5.0 still carries a rate: it is not drawn.
+  expect(fmtSpeed({ ttftMs: 800, tokPerS: 9844 } as { ttftMs: number })).toBe('ttft 0.8s')
 })
 
 test('a window keeps its reset time, drawn as the time left', () => {
@@ -494,7 +493,7 @@ test('each rate-limit window shows the time to its reset where the main panel ha
   await narrow.unmount()
 })
 
-test("the main box shows the last request's time to first token and decode speed", async ($, on) => {
+test("the main box shows the last request's time to first token, and no tokens per second", async ($, on) => {
   const clock = engine(on)
   // The model beneath: 800 ms to its first words, then 2 s more to stop after 120 tokens.
   on('turn.step', async function* () {
@@ -519,7 +518,8 @@ test("the main box shows the last request's time to first token and decode speed
   await s.result
   for (const cols of [40, 64, 120]) {
     const ui = await $.ui.mount({ ...pane(cols), surface: 'terminal' })
-    expect(await ui.find({ text: /ttft 0\.8s · 60 tok\/s/ })).toBeDefined()
+    expect(await ui.find({ text: /ttft 0\.8s$/ })).toBeDefined()
+    expect(await ui.find({ text: /tok\/s/ })).toBeUndefined()
     await ui.unmount()
   }
 })

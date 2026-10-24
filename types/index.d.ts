@@ -11,9 +11,9 @@ export type Main = {
   mode: string
   steps: number
   isRunning: boolean
-  /** The main loop's last answered request: time to its first piece of response, and output tokens
-   *  per second from that piece to the stop. Null until one is measured, absent in older state. */
-  speed?: { ttftMs: number; tokPerS: number | null } | null
+  /** The main loop's last answered request: time to its first piece of response. Null until one is
+   *  measured, absent in older state; a `tokPerS` kept by 0.5.0 and earlier is ignored. */
+  speed?: { ttftMs: number } | null
 }
 
 export type Usage = {
