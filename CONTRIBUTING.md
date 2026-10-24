@@ -22,6 +22,8 @@ npx -p typescript tsc -p .
 
 All three must pass. The type check needs `.claude-plugin/types/`, which Claude Code writes the first time it loads the mod.
 
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the same three checks on every pull request and on each push to `main`.
+
 ## Ground rules
 
 - **Real data only.** Every number on the pane must come from a session event. If something is inferred, label it in the pane and in the README's "What is inferred" section.
