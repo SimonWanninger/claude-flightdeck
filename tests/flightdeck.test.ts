@@ -5,6 +5,7 @@ import {
   DEFAULT_ARCHITECT,
   DEFAULT_GATE,
   DEFAULT_TURN,
+  addCard,
   afterCall,
   applyStep,
   consultTimeline,
@@ -120,6 +121,13 @@ test("a card's context is its latest step's whole input; output adds up", () => 
   c = applyStep(c, { model: 'claude-sonnet-5-5', usage: { input_tokens: 10, cache_read_input_tokens: 30_000, cache_creation_input_tokens: 2_000, output_tokens: 500 }, stopReason: 'tool_use' })
   c = applyStep(c, { model: 'claude-sonnet-5-5', usage: { input_tokens: 5, cache_read_input_tokens: 40_000, output_tokens: 700 }, stopReason: 'max_tokens' })
   expect([c.ctx, c.out, c.steps, c.lastStop, c.model]).toEqual([40_005, 1200, 2, 'max_tokens', 'claude-sonnet-5-5'])
+})
+
+test('a resumed agent replaces its card instead of adding a second', () => {
+  const a = normalizeCard({ id: 'a', description: 'first' })
+  const b = normalizeCard({ id: 'b' })
+  const cards = addCard(addCard(addCard([], a), b), { ...a, description: 'again' })
+  expect(cards.map(c => `${c.id}:${c.description}`)).toEqual(['b:', 'a:again'])
 })
 
 test('consults open, close by id, and draw on a shared timeline', () => {
@@ -548,6 +556,18 @@ test("the inline summary's strip holds fewer marks on a graphical surface and ke
     expect(strip?.text.length).toBe(surface === 'terminal' ? 45 : 30)
     expect(strip?.text.endsWith('✗')).toBe(true)
     expect(await ui.find({ text: /59 allowed/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('a draw that fails says why instead of leaving the pane empty', async ($, on) => {
+  on('ui.status', () => ({ value: undefined }))
+  on('clock.now', () => {
+    throw new Error('boom')
+  })
+  for (const cols of [40, 64, 120]) {
+    const ui = await $.ui.mount({ ...pane(cols), surface: 'terminal' })
+    expect(await ui.find({ text: /^draw failed \(throw\)/ })).toBeDefined()
     await ui.unmount()
   }
 })

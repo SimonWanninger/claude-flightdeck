@@ -437,6 +437,9 @@ export const applyStep = (c: AgentCard, s: { model: string; usage: StepUsage; st
 
 export const noteTool = (c: AgentCard, n: ToolNote): AgentCard => ({ ...c, tools: [...c.tools, n].slice(-3) })
 
+/** A spawned card joins the list; an id already there (an agent resumed) is replaced, so no two cards share keys. */
+export const addCard = (cards: AgentCard[], card: AgentCard): AgentCard[] => [...cards.filter(c => c.id !== card.id), card].slice(-24)
+
 export const stepLoop = (loops: Loop[], id: string, at: number): Loop[] => {
   const found = loops.find(l => l.id === id)
   const next = found

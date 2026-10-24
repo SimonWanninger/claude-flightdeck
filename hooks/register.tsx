@@ -4,6 +4,7 @@ import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 import type { AgentCard, Architect, Bucket, Check, Gate, Layout, LogLine, Loop, Main, Roster, Turn, Usage, View } from '../types'
 import {
   DEFAULT_ARCHITECT,
+  addCard,
   DEFAULT_GATE,
   DEFAULT_MAIN,
   DEFAULT_ROSTER,
@@ -488,7 +489,7 @@ export const register: Register = (on, options) => {
       description: e.description,
       spawnedAt: await $.clock.now(),
     }
-    await update($, agents, list => [...listOf<unknown>(list).map(normalizeCard), card].slice(-24))
+    await update($, agents, list => addCard(listOf<unknown>(list).map(normalizeCard), card))
     await update($, loops, l => listOf<Loop>(l).filter(x => x.id !== id))
     await say($, shorten(cardTitle(card), 12), `spawned · ${card.type}`, 'info', id)
     await refreshStatus($, cfg)
@@ -536,10 +537,21 @@ export const register: Register = (on, options) => {
 
   // ---------------------------------------------------------------- drawing
 
+  // After a surface module faults, this load draws the rails and clocks as plain text.
+  let isClientOff = false
+  on('ui.fault', async ($, e, next) => {
+    if (e.requestId === PANE && !isClientOff) {
+      isClientOff = true
+      $.ui.log(`flightdeck: ${e.module} faulted (${e.phase}: ${e.reason}); drawing without animation`)
+      $.ui.invalidate('ui.render')
+    }
+    return next(e)
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const els = $.ui.resolve(e)
     const { Box, Text, Button } = els
-    const hasClient = 'Client' in els
+    const hasClient = 'Client' in els && !isClientOff
     const [m, u, a, g, cards, lp, lines, t, r, v, now] = await Promise.all([
       getMain($),
       getUsage($),
@@ -1135,6 +1147,15 @@ export const register: Register = (on, options) => {
         </Box>
         {body}
         {svgLanes}
+      </Box>
+    )
+  }).catch(($, e, next) => {
+    // Without this a failed draw leaves the engine's empty pane.
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column" width={Math.max(20, e.props.bodyColumns)}>
+        <Text bold>FLIGHTDECK</Text>
+        <Text color={C.warn} wrap="wrap">{`draw failed (${next.error.kind}): ${next.error.message ?? 'no message'}`}</Text>
       </Box>
     )
   })
