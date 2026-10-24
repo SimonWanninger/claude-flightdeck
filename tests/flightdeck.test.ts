@@ -5,9 +5,19 @@ import {
   DEFAULT_ARCHITECT,
   DEFAULT_GATE,
   DEFAULT_TURN,
+  DEFAULT_USAGE,
+  COMPACT_TRIES,
+  addCard,
+  afterCompactRead,
+  claimCompactRead,
+  faultKey,
+  forgetCompactRead,
+  resumeCard,
   afterCall,
   applyStep,
+  compactWindowOf,
   consultTimeline,
+  contextFill,
   describeInput,
   endConsult,
   fitLegend,
@@ -18,6 +28,7 @@ import {
   limitLabel,
   limitOf,
   logRows,
+  marksIn,
   momentOf,
   normalizeCard,
   normalizeGate,
@@ -121,6 +132,18 @@ test("a card's context is its latest step's whole input; output adds up", () => 
   expect([c.ctx, c.out, c.steps, c.lastStop, c.model]).toEqual([40_005, 1200, 2, 'max_tokens', 'claude-sonnet-5-5'])
 })
 
+test('a resumed agent runs again on its own card instead of adding a second', () => {
+  const a = { ...normalizeCard({ id: 'a', description: 'first', spawnedAt: 5, model: 'claude-sonnet-5-5' }), status: 'done' as const, endedAt: 100, steps: 4, out: 900 }
+  const b = normalizeCard({ id: 'b' })
+  const cards = addCard(addCard(addCard([], a), b), { ...normalizeCard({ id: 'a', description: 'again', spawnedAt: 200 }) })
+  expect(cards.map(c => `${c.id}:${c.description}`)).toEqual(['a:again', 'b:'])
+  expect(cards[0] && [cards[0].status, cards[0].endedAt, cards[0].steps, cards[0].out, cards[0].spawnedAt]).toEqual(['running', null, 4, 900, 5])
+  expect([resumeCard(a).status, resumeCard(a).endedAt]).toEqual(['running', null])
+  // Spawned again on another model, the card names it; a spawn that names none keeps the card's.
+  expect(addCard([a], normalizeCard({ id: 'a', model: 'claude-opus-5-5' }))[0]?.model).toBe('claude-opus-5-5')
+  expect(addCard([a], normalizeCard({ id: 'a' }))[0]?.model).toBe('claude-sonnet-5-5')
+})
+
 test('consults open, close by id, and draw on a shared timeline', () => {
   let a = startConsult(DEFAULT_ARCHITECT, { id: 's1', at: 0, moment: 'before a plan', via: 'advisor tool' })
   a = startConsult(a, { id: 's1', at: 5, moment: 'before a plan', via: 'again' }) // same id: ignored
@@ -136,11 +159,12 @@ test('consults open, close by id, and draw on a shared timeline', () => {
 
 test('config is read leniently: bad values fall back to defaults', () => {
   const d = parseConfig({})
-  expect([d.maxCards, d.layout, d.motion, d.moments, d.panels.length]).toEqual([3, 'auto', true, true, 7])
+  expect([d.maxCards, d.paneColumns, d.layout, d.motion, d.moments, d.panels.length]).toEqual([3, 66, 'auto', true, true, 7])
   expect(d.architect.test('fable-advisor:fable-advisor')).toBe(true)
   const c = parseConfig({ architectPattern: '([', maxCards: 99, layout: 'diagonal', panels: 'log, gate ,nope,gate', motion: 'off' })
   expect(c.architect.test('advisor')).toBe(true) // invalid regex → default
   expect([c.maxCards, c.layout, c.motion]).toEqual([6, 'auto', false])
+  expect([46.4, 12, Number.NaN, '90'].map(n => parseConfig({ paneColumns: n }).paneColumns)).toEqual([46, 40, 66, 66])
   expect(c.panels).toEqual(['log', 'gate'])
 })
 
@@ -163,6 +187,7 @@ test('layout math: lanes share one axis, the log gets 4-8 rows, the legend never
   expect((b?.before ?? 0) + (b?.bar ?? 0) + (b?.after ?? 0)).toBe(20)
   expect([logRows(10, 40), logRows(50, 40), logRows(200, 40)]).toEqual([4, 7, 8])
   expect(fitLegend([{ label: 'main' }, { label: 'agents' }, { label: 'architect' }], 20).map(x => x.label)).toEqual(['main', 'agents'])
+  expect([marksIn(64, true), marksIn(64, false), marksIn(6, false)]).toEqual([64, 42, 4])
   expect(limitLabel('five_hour')).toBe('5h')
   expect(prettyModel('claude-opus-5-5[1m]')).toBe('Opus 5.5 1M')
   expect(prettyModel('us.anthropic.claude-sonnet-4-5-20250929-v1:0')).toBe('Sonnet 4.5')
@@ -494,4 +519,403 @@ test("the main box shows the last request's time to first token and decode speed
     expect(await ui.find({ text: /ttft 0\.8s · 60 tok\/s/ })).toBeDefined()
     await ui.unmount()
   }
+})
+
+test('on a graphical surface, rows of marks hold fewer marks, keep the newest and clip at their box', async ($, on) => {
+  engine(on)
+  // The newest check is the one refused: its ✗ must stay in sight.
+  on('tool.check', (_$, e) => ({ decision: e.tool_use_id === 'g29' ? 'deny' : 'allow' }))
+  const usage = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'claude-opus-5-5' }
+  on('turn.step', async function* () {
+    return { turnId: 'G1', index: 0, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage }
+  })
+  for (let i = 0; i < 30; i += 1) await $.tool.check({ tool: 'Read', input: { file_path: `/f${i}.ts` }, tool_use_id: `g${i}` })
+  // A loop that is no card and no architect: a dot on the "other loops" row.
+  const s = $.turn.step({ turnId: 'G1', index: 0, model: 'claude-opus-5-5', messageCount: 1, agentId: 'wf1' })
+  for await (const _ of s) void _
+  await s.result
+  await $.session
+    .append({
+      message: { type: 'assistant', role: 'assistant', content: [{ type: 'server_tool_use', id: 'srvG', name: 'advisor', input: {} }] as never },
+      door: 'response',
+      origin: { kind: 'model', model: 'claude-opus-5-5' } as never,
+      uuid: 'marks-row',
+    })
+    .catch(() => undefined)
+  for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
+    for (const cols of [40, 64, 120]) {
+      const ui = await $.ui.mount({ ...pane(cols), surface })
+      // A terminal draws all 30 marks; a graphical surface draws fewer where 30 would not fit
+      // (24 in the 36 cells of a 40-column pane), always ending on the newest.
+      const strip = await ui.find({ type: 'Text', text: /^[■✗]{2,}$/ })
+      expect(strip?.props.wrap).toBe('truncate-start')
+      expect(strip?.text.length).toBe(surface !== 'terminal' && cols === 40 ? 24 : 30)
+      expect(strip?.text.endsWith('✗')).toBe(true)
+      expect((await ui.find({ type: 'Text', text: /^●$/ }))?.props.wrap).toBe('truncate-start')
+      expect((await ui.find({ type: 'Text', text: /^[─━◆]+$/ }))?.props.wrap).toBe('truncate-middle')
+      expect((await ui.find({ key: 'legend' }))?.props.marginBottom).toBe(surface === 'terminal' ? 0 : 1)
+      await ui.unmount()
+    }
+  }
+})
+
+test("the inline summary's strip holds fewer marks on a graphical surface and keeps the newest", async ($, on) => {
+  engine(on)
+  on('tool.check', (_$, e) => ({ decision: e.tool_use_id === 'n59' ? 'deny' : 'allow' }))
+  for (let i = 0; i < 60; i += 1) await $.tool.check({ tool: 'Bash', input: { command: `ls ${i}` }, tool_use_id: `n${i}` })
+  for (const surface of ['terminal', 'vscode'] as const) {
+    const ui = await $.ui.mount({ ...pane(80), props: { ...pane(80).props, placement: 'inline' as const }, surface })
+    // 80 columns less "gate " and " 59 allowed · 0 you · 1 denied" leave 45: 45 marks in a terminal, 30 elsewhere.
+    const strip = await ui.find({ type: 'Text', text: /^[■✗]{2,}$/ })
+    expect(strip?.props.wrap).toBe('truncate-start')
+    expect(strip?.text.length).toBe(surface === 'terminal' ? 45 : 30)
+    expect(strip?.text.endsWith('✗')).toBe(true)
+    expect(await ui.find({ text: /59 allowed/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('a draw that fails says why instead of leaving the pane empty', async ($, on) => {
+  on('ui.status', () => ({ value: undefined }))
+  on('clock.now', () => {
+    throw new Error('boom')
+  })
+  for (const cols of [40, 64, 120]) {
+    const ui = await $.ui.mount({ ...pane(cols), surface: 'terminal' })
+    expect(await ui.find({ text: /^draw failed \(throw\)/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('a finished agent that takes another step (resumed by SendMessage) runs again, in the pane and the status line', async ($, on) => {
+  // engine(on), with a status line that keeps what it was told
+  mock.clock(on)
+  const status: (string | undefined)[] = []
+  on('ui.status', (_$, e) => (status.push(e.text), { value: undefined }))
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'r1' }))
+  const usage = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'claude-sonnet-5-5' }
+  on('turn.step', async function* () {
+    return { turnId: 'R1', index: 0, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage }
+  })
+  const step = async () => {
+    const s = $.turn.step({ turnId: 'R1', index: 0, model: 'claude-sonnet-5-5', messageCount: 1, agentId: 'r1' })
+    for await (const _ of s) void _
+    await s.result
+  }
+  await $.turn.start({ text: 'go', turnId: 'T1' })
+  await $.agent.spawn(spawn('general-purpose', 'Audit the parser'))
+  await step()
+  await $.turn.complete({ answer: 'ok', durationMs: 10, isAborted: false, turnId: 'R1', agentId: 'r1', reason: 'answer' })
+  expect(status[status.length - 1]).toMatch(/agents 0\/1/)
+  await step()
+  expect(status[status.length - 1]).toMatch(/agents 1\/1/)
+  const ui = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+  expect(await ui.find({ text: /◐ running/ })).toBeDefined()
+  expect(await ui.find({ text: /✓ done/ })).toBeUndefined()
+  expect(await ui.find({ text: /^resumed$/ })).toBeDefined()
+  expect(await ui.find({ text: /ctx 10 · out 10 · 2 st/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the docked pane asks for the width set in paneColumns', { options: { paneColumns: 46 } }, async ($, on) => {
+  engine(on)
+  const asked: (number | undefined)[] = []
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', (_$, e) => ({ value: { command: e.name } }))
+  on('ui.open', (_$, e) => (asked.push(e.columns), { value: { isPlaced: true as const } }))
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+  expect(asked).toEqual([46])
+})
+
+test('the context gauge measures against a compaction window set below the model window', () => {
+  const u = { ...DEFAULT_USAGE, tokens: 200_000, window: 1_000_000, compactWindow: 400_000 }
+  // From the real reading, not the model's percentage: 200k of 400k.
+  expect(contextFill(u)).toEqual({ pct: 50, window: 400_000 })
+  expect(contextFill({ ...u, tokens: 100_000 })).toEqual({ pct: 25, window: 400_000 })
+  // None set, or not below the model's window: the model's window.
+  expect(contextFill({ ...u, compactWindow: null })).toEqual({ pct: 20, window: 1_000_000 })
+  expect(contextFill({ ...u, compactWindow: 1_000_000 })).toEqual({ pct: 20, window: 1_000_000 })
+  expect(contextFill({ ...u, compactWindow: 1_500_000 })).toEqual({ pct: 20, window: 1_000_000 })
+  expect(contextFill({ ...u, compactWindow: 0 })).toEqual({ pct: 20, window: 1_000_000 })
+  // No reading yet, no gauge; and none from a window not yet known.
+  expect(contextFill({ ...u, tokens: null })).toEqual({ pct: null, window: 400_000 })
+  expect(contextFill(DEFAULT_USAGE)).toEqual({ pct: null, window: 0 })
+  expect(contextFill({ ...DEFAULT_USAGE, tokens: 5 }).pct).toBeNull()
+})
+
+test('a breakdown names a compaction window only when auto-compaction is on and it is below the model window', () => {
+  const on = { rawMaxTokens: 400_000, isAutoCompactEnabled: true }
+  expect(compactWindowOf(on, 1_000_000)).toBe(400_000)
+  expect(compactWindowOf({ ...on, isAutoCompactEnabled: false }, 1_000_000)).toBeNull()
+  expect(compactWindowOf({ ...on, rawMaxTokens: 1_000_000 }, 1_000_000)).toBeNull() // the model's own limit
+  expect(compactWindowOf(on, 200_000)).toBeNull() // a model switch to a smaller window
+  expect(compactWindowOf({ ...on, rawMaxTokens: 0 }, 1_000_000)).toBeNull()
+  expect(compactWindowOf(undefined, 1_000_000)).toBeNull() // no breakdown: unknown
+  expect(compactWindowOf(null, 1_000_000)).toBeNull()
+})
+
+/** A session whose `session.usage` answers as a host does: the breakdown only to a call that asks for one. */
+const compactHost = (on: On, o: { window: () => number; compact: number | null; isEnabled?: boolean; tokens?: number }) => {
+  const asked: (string | undefined)[] = []
+  on('session.usage', (_$, e) => {
+    asked.push(e.breakdown)
+    const window = o.window()
+    const breakdown =
+      e.breakdown && o.compact !== null
+        ? { rawMaxTokens: o.compact, isAutoCompactEnabled: o.isEnabled ?? true, totalTokens: 123, percentage: 99 }
+        : undefined
+    return { value: { startedAt: 0, rateLimits: [], context: { window, ...(o.tokens !== undefined ? { tokens: o.tokens } : {}), ...(breakdown ? { breakdown: breakdown as never } : {}) } } }
+  })
+  return asked
+}
+
+test('the gauge, status and inline summary measure against the compaction window, read once per model window', async ($, on) => {
+  mock.clock(on)
+  let status: string | undefined
+  on('ui.status', (_$, e) => {
+    status = e.text
+    return { value: undefined }
+  })
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  let window = 1_000_000
+  const asked = compactHost(on, { window: () => window, compact: 400_000 })
+  const measure = (tokens: number) =>
+    $.session.measure({ context: { window, tokens, percent: tokens / (window / 100) }, rateLimits: [], changed: ['context'] })
+  await measure(100_000)
+  await measure(150_000)
+  await measure(200_000)
+  // Three measurements, one summary breakdown: never `full`, which would send token-count requests.
+  expect(asked.filter(Boolean)).toEqual(['summary'])
+  expect(status).toBe('ctx 50%') // not the host's 20% of a million
+  for (const cols of [40, 64, 120]) {
+    const ui = await $.ui.mount({ ...pane(cols), surface: 'terminal' })
+    expect(await ui.find({ text: /200k\/400k/ })).toBeDefined()
+    expect(await ui.find({ text: / 50%/ })).toBeDefined()
+    expect(await ui.find({ text: /1\.0M/ })).toBeUndefined()
+    await ui.unmount()
+    const mini = await $.ui.mount({ ...pane(cols), props: { ...pane(cols).props, placement: 'inline' as const }, surface: 'terminal' })
+    expect(await mini.find({ text: / 50%/ })).toBeDefined()
+    await mini.unmount()
+  }
+  // Past 80% of the compaction window the gauge warns, though the model's window has room.
+  await measure(340_000)
+  const warn = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+  expect((await warn.find({ type: 'Text', text: /^▰+$/ }))?.props.color).toBe('error')
+  expect(await warn.find({ text: / 85%/ })).toBeDefined()
+  await warn.unmount()
+  // A model with a smaller window: read again, and a compaction window above it no longer counts.
+  window = 200_000
+  await measure(100_000)
+  expect(asked.filter(Boolean)).toEqual(['summary', 'summary'])
+  const small = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+  expect(await small.find({ text: /100k\/200k/ })).toBeDefined()
+  await small.unmount()
+})
+
+const keepsModelWindow = (name: string, host: { compact: number | null; isEnabled?: boolean }, asks: number) =>
+  test(name, async ($, on) => {
+    mock.clock(on)
+    on('ui.status', () => ({ value: undefined }))
+    on('session.measure', (_$, e) => ({ changed: e.changed }))
+    const asked = compactHost(on, { window: () => 1_000_000, ...host })
+    for (const tokens of [50_000, 100_000, 200_000, 250_000, 300_000]) {
+      await $.session.measure({ context: { window: 1_000_000, tokens, percent: tokens / 10_000 }, rateLimits: [], changed: ['context'] })
+    }
+    // An answer is asked for once; no breakdown (no session bound yet) is asked again, COMPACT_TRIES in all.
+    expect(asked.filter(Boolean).length).toBe(asks)
+    for (const cols of [40, 64, 120]) {
+      const ui = await $.ui.mount({ ...pane(cols), surface: 'terminal' })
+      expect(await ui.find({ text: /300k\/1\.0M/ })).toBeDefined()
+      expect(await ui.find({ text: / 30%/ })).toBeDefined()
+      await ui.unmount()
+    }
+  })
+
+keepsModelWindow('a host that gives no breakdown keeps the model window and stops asking after 3 tries', { compact: null }, 3)
+keepsModelWindow('with auto-compaction off the gauge keeps the model window and is asked once', { compact: 400_000, isEnabled: false }, 1)
+
+test('a resumed session reads its compaction window at start, and /clear leaves the reading alone', async ($, on) => {
+  mock.clock(on)
+  on('ui.status', () => ({ value: undefined }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  on('command.register', () => ({ value: { command: 'flightdeck' } }))
+  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  // Resumed with 200k already in context.
+  const asked = compactHost(on, { window: () => 1_000_000, compact: 400_000, tokens: 200_000 })
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  expect(asked).toEqual([undefined, 'summary'])
+  const resumed = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+  expect(await resumed.find({ text: /200k\/400k/ })).toBeDefined()
+  expect(await resumed.find({ text: / 50%/ })).toBeDefined()
+  await resumed.unmount()
+  // The gauge waits for the next measurement after a /clear; the compaction window is not asked again.
+  await $.session.end({ reason: 'clear', sessionId: 's' } as never)
+  await $.session.measure({ context: { window: 1_000_000, tokens: 100_000, percent: 10 }, rateLimits: [], changed: ['context'] })
+  expect(asked).toEqual([undefined, 'summary'])
+  const cleared = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+  expect(await cleared.find({ text: /100k\/400k/ })).toBeDefined()
+  expect(await cleared.find({ text: / 25%/ })).toBeDefined()
+  await cleared.unmount()
+})
+
+test('a compaction-window read that fails is asked again at the next measurement', async ($, on) => {
+  mock.clock(on)
+  on('ui.status', () => ({ value: undefined }))
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  let reads = 0
+  on('session.usage', (_$, e) => {
+    if (e.breakdown && ++reads === 1) return { deny: 'not bound yet' }
+    const breakdown = e.breakdown ? { rawMaxTokens: 400_000, isAutoCompactEnabled: true } : undefined
+    return { value: { startedAt: 0, rateLimits: [], context: { window: 1_000_000, ...(breakdown ? { breakdown: breakdown as never } : {}) } } }
+  })
+  const measure = (tokens: number) =>
+    $.session.measure({ context: { window: 1_000_000, tokens, percent: tokens / 10_000 }, rateLimits: [], changed: ['context'] })
+  await measure(100_000)
+  const failed = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+  expect(await failed.find({ text: /100k\/1\.0M/ })).toBeDefined()
+  await failed.unmount()
+  await measure(200_000)
+  await measure(300_000)
+  expect(reads).toBe(2) // the failed read once more, then not again
+  const read = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+  expect(await read.find({ text: /300k\/400k/ })).toBeDefined()
+  expect(await read.find({ text: / 75%/ })).toBeDefined()
+  await read.unmount()
+})
+
+test('a compaction-window read is claimed once per model window, missed reads retried up to a cap, stale ones dropped', () => {
+  const b = { rawMaxTokens: 400_000, isAutoCompactEnabled: true }
+  const fresh = { ...DEFAULT_USAGE, window: 1_000_000 }
+  const first = claimCompactRead(fresh, 1_000_000)
+  expect([first.isClaimed, first.usage.compactFor]).toEqual([true, 1_000_000])
+  expect(claimCompactRead(first.usage, 1_000_000).isClaimed).toBe(false) // already claimed
+  expect(afterCompactRead(first.usage, 1_000_000, b).compactWindow).toBe(400_000)
+  // A read for a window no longer claimed (the model switched while it ran) changes nothing.
+  const switched = claimCompactRead({ ...first.usage, window: 1_000_000 }, 200_000).usage
+  expect(afterCompactRead(switched, 1_000_000, b)).toBe(switched)
+  // A miss (no breakdown, or a failed call) gives the claim back and counts; COMPACT_TRIES misses stop asking.
+  let u = first.usage
+  for (let i = 0; i < COMPACT_TRIES; i += 1) {
+    const c = claimCompactRead(u, 1_000_000)
+    expect(c.isClaimed || i === 0).toBe(true)
+    u = afterCompactRead(c.isClaimed ? c.usage : u, 1_000_000, i % 2 ? null : undefined)
+  }
+  expect([u.compactFor, u.compactMisses, u.compactWindow]).toEqual([0, COMPACT_TRIES, null])
+  expect(claimCompactRead(u, 1_000_000).isClaimed).toBe(false)
+  // Another model window, or another model, starts afresh.
+  expect(claimCompactRead(u, 200_000).isClaimed).toBe(true)
+  expect(claimCompactRead(forgetCompactRead({ ...u, compactWindow: 400_000 }), 1_000_000).isClaimed).toBe(true)
+  expect(forgetCompactRead({ ...u, compactWindow: 400_000 }).compactWindow).toBe(null)
+})
+
+test("a surface module's fault key is the same for the hook's path, either separator, and the drawing's name", () => {
+  expect(faultKey('desktop', 'hooks/rail.tsx')).toBe('desktop:rail.tsx')
+  expect(faultKey('desktop', 'hooks\\rail.tsx')).toBe(faultKey('desktop', 'rail.tsx'))
+  expect(faultKey('terminal', 'hooks/elapsed.tsx')).not.toBe(faultKey('desktop', 'hooks/elapsed.tsx'))
+})
+
+test('switching to another model with the same window reads its compaction window afresh', async ($, on) => {
+  mock.clock(on)
+  on('ui.status', () => ({ value: undefined }))
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  let compact = 400_000
+  let reads = 0
+  on('session.usage', (_$, e) => {
+    if (e.breakdown) reads += 1
+    const breakdown = e.breakdown ? { rawMaxTokens: compact, isAutoCompactEnabled: true } : undefined
+    return { value: { startedAt: 0, rateLimits: [], context: { window: 1_000_000, ...(breakdown ? { breakdown: breakdown as never } : {}) } } }
+  })
+  const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'x' }
+  on('turn.step', async function* () {
+    return { turnId: 'M1', index: 0, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage }
+  })
+  const step = async (model: string) => {
+    const s = $.turn.step({ turnId: 'M1', index: 0, model, messageCount: 1 })
+    for await (const _ of s) void _
+    await s.result
+  }
+  const measure = (tokens: number) =>
+    $.session.measure({ context: { window: 1_000_000, tokens, percent: tokens / 10_000 }, rateLimits: [], changed: ['context'] })
+  await step('claude-opus-5-5[1m]')
+  await measure(300_000)
+  await step('claude-opus-5-5[1m]')
+  await measure(360_000)
+  expect(reads).toBe(1) // the same model: not asked again
+  // Another 1M model whose own autoCompactWindow (modelSettings) is 700k.
+  compact = 700_000
+  await step('claude-sonnet-5-5[1m]')
+  await measure(360_000)
+  expect(reads).toBe(2)
+  const ui = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+  expect(await ui.find({ text: /360k\/700k/ })).toBeDefined()
+  expect(await ui.find({ text: / 51%/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a resume through agent.spawn logs once, whether its spawn or its first step lands first; "done" times the run', async ($, on) => {
+  const clock = mock.clock(on)
+  on('ui.status', () => ({ value: undefined }))
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  const usage = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'claude-sonnet-5-5' }
+  on('turn.step', async function* () {
+    return { turnId: 'R1', index: 0, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage }
+  })
+  const step = async () => {
+    const s = $.turn.step({ turnId: 'R1', index: 0, model: 'claude-sonnet-5-5', messageCount: 1, agentId: 'r1' })
+    for await (const _ of s) void _
+    await s.result
+  }
+  // A resumed agent may take its first step before its spawn's own hooks have finished.
+  let isStepFirst = false
+  on('agent.spawn', async (_$, e) => {
+    if (e.resume && isStepFirst) await step()
+    return { model: 'claude-sonnet-5-5', agentId: e.resume?.agentId ?? 'r1' }
+  })
+  const complete = (durationMs: number) =>
+    $.turn.complete({ answer: 'ok', durationMs, isAborted: false, turnId: 'R1', agentId: 'r1', reason: 'answer' })
+  const lines = async (re: RegExp) => {
+    const ui = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+    const n = (await ui.findAll({ text: re })).length
+    await ui.unmount()
+    return n
+  }
+  await $.turn.start({ text: 'go', turnId: 'T1' })
+  await $.agent.spawn(spawn('general-purpose', 'Audit the parser'))
+  await step()
+  await clock.advance(60_000)
+  await complete(60_000)
+  // Idle half an hour, then resumed: the spawn first, then its step.
+  await clock.advance(30 * 60_000)
+  await $.agent.spawn({ ...spawn('general-purpose', 'Audit it again'), resume: { agentId: 'r1' } })
+  await step()
+  expect(await lines(/^resumed$/)).toBe(1)
+  await clock.advance(90_000)
+  await complete(90_000)
+  // Resumed again, its first step landing inside the spawn.
+  isStepFirst = true
+  await $.agent.spawn({ ...spawn('general-purpose', 'And once more'), resume: { agentId: 'r1' } })
+  expect(await lines(/^resumed$/)).toBe(2)
+  expect(await lines(/^Audit the parser$/)).toBe(0) // one card, the latest task
+  // Each run timed on its own, not from the first spawn.
+  expect(await lines(/^done · 1m00s$/)).toBe(1)
+  expect(await lines(/^done · 1m30s$/)).toBe(1)
+})
+
+test("a subagent's turn start is its own: no prompt line, and the main turn keeps its count", async ($, on) => {
+  engine(on)
+  on('tool.call', () => ({ result: {}, text: 'ok' }))
+  await $.turn.start({ text: 'refactor it', turnId: 'T1' })
+  await $.tool.call({ tool: 'Edit', file_path: '/x.ts', old_string: 'a', new_string: 'b' } as never)
+  await $.turn.start({ text: 'Look at the parser again', turnId: 'A1', agentId: 'sub1' })
+  await $.turn.complete({ answer: '', durationMs: 1000, isAborted: false, turnId: 'T1', reason: 'answer' })
+  const ui = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+  expect(await ui.find({ text: /Look at the parser again/ })).toBeUndefined()
+  expect(await ui.find({ text: /refactor it/ })).toBeDefined()
+  expect(await ui.find({ text: /· 1 edit ·/ })).toBeDefined()
+  await ui.unmount()
 })

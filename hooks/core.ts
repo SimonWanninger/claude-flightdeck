@@ -30,6 +30,9 @@ export const DEFAULT_USAGE: Usage = {
   pct: null,
   tokens: null,
   window: 0,
+  compactWindow: null,
+  compactFor: 0,
+  compactMisses: 0,
   costUsd: null,
   limits: [],
   compactions: 0,
@@ -103,6 +106,7 @@ export type Config = {
   moments: boolean
   matchDescriptions: boolean
   maxCards: number
+  paneColumns: number
   layout: Layout
   palette: Palette
   openOnStart: boolean
@@ -127,6 +131,7 @@ export const parseConfig = (o: Readonly<Record<string, unknown>>): Config => {
     .filter((p): p is Panel => (PANELS as readonly string[]).includes(p))
   const layout = str('layout', 'auto')
   const max = typeof o.maxCards === 'number' ? Math.round(o.maxCards) : 3
+  const cols = typeof o.paneColumns === 'number' && Number.isFinite(o.paneColumns) ? Math.round(o.paneColumns) : 66
   return {
     architect: safeRegExp(str('architectPattern', ''), 'advisor|architect'),
     architectLabel: str('architectLabel', 'ARCHITECT'),
@@ -136,6 +141,8 @@ export const parseConfig = (o: Readonly<Record<string, unknown>>): Config => {
     moments: bool('moments', true),
     matchDescriptions: bool('matchDescriptions', false),
     maxCards: Math.min(6, Math.max(1, max)),
+    // The body clamps its drawing at 40 columns, so a narrower dock would only clip it.
+    paneColumns: Math.max(40, cols),
     layout: layout === 'compact' || layout === 'wide' || layout === 'mini' ? layout : 'auto',
     palette: str('palette', 'theme') === 'pastel' ? 'pastel' : 'theme',
     openOnStart: bool('openOnStart', true),
@@ -247,6 +254,52 @@ export const stepSpeed = (sentAt: number, firstAt: number | null, stopAt: number
 /** `ttft 0.8s · 42 tok/s`; the rate is left off when it is unknown. */
 export const fmtSpeed = (s: { ttftMs: number; tokPerS: number | null }) =>
   `ttft ${(s.ttftMs / 1000).toFixed(1)}s` + (s.tokPerS !== null ? ` · ${Math.round(s.tokPerS)} tok/s` : '')
+
+/** The compaction window a context breakdown reports: its `rawMaxTokens` when auto-compaction is on and that is smaller than the model's `window`; else null. */
+export const compactWindowOf = (b: { rawMaxTokens: number; isAutoCompactEnabled: boolean } | null | undefined, window: number): number | null =>
+  b && b.isAutoCompactEnabled && b.rawMaxTokens > 0 && b.rawMaxTokens < window ? b.rawMaxTokens : null
+
+/**
+ * What the context gauge measures: the compaction window when one is set smaller than the model's,
+ * else the model's window, and the fill of it from the real `tokens` reading. No gauge (null) without one.
+ */
+export const contextFill = (u: Pick<Usage, 'tokens' | 'window' | 'compactWindow'>): { pct: number | null; window: number } => {
+  const window = u.compactWindow !== null && u.compactWindow > 0 && u.compactWindow < u.window ? u.compactWindow : u.window
+  return { window, pct: u.tokens !== null && window > 0 ? (u.tokens * 100) / window : null }
+}
+
+/** Reads of the compaction window that may miss (no session bound yet) before a model window stops asking. */
+export const COMPACT_TRIES = 3
+
+/**
+ * A measurement of model window `window`: whether it reads the compaction window (not read for this
+ * window yet, fewer than COMPACT_TRIES misses), and the usage with that read claimed. A new window
+ * starts its misses afresh.
+ */
+export const claimCompactRead = (u: Usage, window: number): { usage: Usage; isClaimed: boolean } => {
+  const misses = u.window === window ? u.compactMisses : 0
+  const isClaimed = window > 0 && u.compactFor !== window && misses < COMPACT_TRIES
+  return { usage: { ...u, compactFor: isClaimed ? window : u.compactFor, compactMisses: misses }, isClaimed }
+}
+
+/**
+ * The usage after a compaction-window read for model window `window`. Dropped when a newer claim took
+ * its place (a model switch); a read that failed or came back with no breakdown is a miss, asked
+ * again at the next measurement.
+ */
+export const afterCompactRead = (
+  u: Usage,
+  window: number,
+  b: { rawMaxTokens: number; isAutoCompactEnabled: boolean } | null | undefined,
+): Usage =>
+  u.compactFor !== window
+    ? u
+    : b
+      ? { ...u, compactWindow: compactWindowOf(b, window), compactMisses: 0 }
+      : { ...u, compactWindow: null, compactFor: 0, compactMisses: u.compactMisses + 1 }
+
+/** A new main-loop model may compact in another window (`modelSettings`): read afresh at the next measurement. */
+export const forgetCompactRead = (u: Usage): Usage => ({ ...u, compactWindow: null, compactFor: 0, compactMisses: 0 })
 
 /** A gauge of `width` cells: ▰ filled, ▱ empty. */
 export const gauge = (pct: number, width: number) => {
@@ -437,6 +490,21 @@ export const applyStep = (c: AgentCard, s: { model: string; usage: StepUsage; st
 
 export const noteTool = (c: AgentCard, n: ToolNote): AgentCard => ({ ...c, tools: [...c.tools, n].slice(-3) })
 
+/** A surface module's fault key, `desktop:rail.tsx`, from `hooks/rail.tsx` or `hooks\rail.tsx` alike. */
+export const faultKey = (surface: string, module: string) => `${surface}:${module.split(/[\\/]/).pop()}`
+
+/** A card whose agent was resumed after it finished (SendMessage): running again, its clock from its first spawn. */
+export const resumeCard = (c: AgentCard): AgentCard => ({ ...c, status: 'running', endedAt: null })
+
+/**
+ * A spawned card joins the list. An id already there is that agent resumed: its card runs again
+ * where it stands, with its tallies and the new task and model, so no two cards share keys.
+ */
+export const addCard = (cards: AgentCard[], card: AgentCard): AgentCard[] =>
+  cards.some(c => c.id === card.id)
+    ? cards.map(c => (c.id === card.id ? resumeCard({ ...c, description: card.description || c.description, model: card.model || c.model }) : c))
+    : [...cards, card].slice(-24)
+
 export const stepLoop = (loops: Loop[], id: string, at: number): Loop[] => {
   const found = loops.find(l => l.id === id)
   const next = found
@@ -476,6 +544,13 @@ export const fitLegend = <T extends { label: string }>(items: T[], width: number
   }
   return out
 }
+
+/**
+ * How many marks (■ ✗ ● ○ ✓) a row of `cells` columns holds. A terminal draws each mark in one
+ * cell; a graphical surface draws them wider (■ measured about 1.4 cells on the desktop app), so
+ * there a row holds fewer and its newest marks still show.
+ */
+export const marksIn = (cells: number, isTerminal: boolean) => (isTerminal ? cells : Math.floor(cells / 1.5))
 
 /** A card's title row: the task in the agent's own words, the type only when there is none. */
 export const cardTitle = (c: AgentCard) => c.description || c.type

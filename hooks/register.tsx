@@ -1,9 +1,11 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { AgentCard, Architect, Bucket, Check, Gate, Layout, LogLine, Loop, Main, Roster, Turn, Usage, View } from '../types'
 import {
   DEFAULT_ARCHITECT,
+  addCard,
+  resumeCard,
   DEFAULT_GATE,
   DEFAULT_MAIN,
   DEFAULT_ROSTER,
@@ -16,6 +18,11 @@ import {
   applyStep,
   bucketOf,
   cardTitle,
+  afterCompactRead,
+  claimCompactRead,
+  contextFill,
+  faultKey,
+  forgetCompactRead,
   titleLines,
   consultTimeline,
   describeInput,
@@ -38,6 +45,7 @@ import {
   fmtSpeed,
   listOf,
   logRows,
+  marksIn,
   momentOf,
   normalize,
   normalizeCard,
@@ -63,7 +71,6 @@ import type { Config, Panel } from './core'
 
 const PANE = 'flightdeck'
 const TITLE = 'Flightdeck'
-const PANE_COLUMNS = 66
 
 
 // ---------------------------------------------------------------- state
@@ -137,8 +144,9 @@ async function refreshStatus($: EngineInterface, cfg: Config) {
   const [u, a, g, cards] = await Promise.all([getUsage($), getArchitect($), getGate($), getCards($)])
   const running = cards.filter(c => c.status === 'running').length
   const s = gateSummary(g)
+  const ctxFill = contextFill(u)
   const parts = [
-    u.pct !== null ? `ctx ${Math.round(u.pct)}%` : null,
+    ctxFill.pct !== null ? `ctx ${Math.round(ctxFill.pct)}%` : null,
     cards.length > 0 ? `agents ${running}/${cards.length}` : null,
     a.consults.length > 0 || a.ids.length > 0 ? `${cfg.architectLabel.toLowerCase()} ${isAdvising(a) ? 'advising' : a.consults.length}` : null,
     s.deny > 0 ? `denied ${s.deny}` : null,
@@ -183,9 +191,9 @@ async function isArchitectType($: EngineInterface, cfg: Config, type: string) {
   return cfg.architect.test(type) || (await getRoster($)).architectTypes.includes(type)
 }
 
-async function openPane($: EngineInterface) {
+async function openPane($: EngineInterface, cfg: Config) {
   // columns apply when docked beside the transcript, rows when seated inline above the prompt.
-  return $.ui.open({ id: PANE, title: TITLE, columns: PANE_COLUMNS, rows: 8 })
+  return $.ui.open({ id: PANE, title: TITLE, columns: cfg.paneColumns, rows: 8 })
 }
 
 async function resetAll($: EngineInterface) {
@@ -200,6 +208,15 @@ async function resetAll($: EngineInterface) {
   await update($, view, () => DEFAULT_VIEW)
   // The context gauge waits for the next measurement rather than showing the pre-clear fill.
   await update($, usage, x => ({ ...normalize(DEFAULT_USAGE, x), pct: null, tokens: null }))
+}
+
+/**
+ * Stores the compaction window for the model window `window`. A `summary` breakdown estimates locally
+ * and sends no request; until the host gives one, the gauge stays on the model's window (afterCompactRead).
+ */
+async function readCompactWindow($: EngineInterface, window: number) {
+  const r = await $.session.usage({ breakdown: 'summary' }).catch(() => null)
+  await update($, usage, x => afterCompactRead(normalize(DEFAULT_USAGE, x), window, r?.context.breakdown))
 }
 
 /** The session's cost read fresh, not from the last measurement: the receipt subtracts two of these. */
@@ -229,19 +246,29 @@ export const register: Register = (on, options) => {
     await migrate($)
     // A host without usage (headless, an SDK host, a session not yet bound) just starts without it.
     const u = await $.session.usage().catch(() => null)
+    // A resumed session has a fill to draw already: its compaction window is read now, not at its first
+    // measurement. Any other start forgets the last reading (the setting may have changed) for that one to read.
+    const resumedWindow = u && u.context.tokens !== undefined && u.context.window > 0 ? u.context.window : 0
     if (u) {
       await update($, usage, x => ({
         ...normalize(DEFAULT_USAGE, x),
         pct: u.context.percent ?? null,
         tokens: u.context.tokens ?? null,
         window: u.context.window,
+        compactFor: resumedWindow,
+        compactMisses: 0,
         costUsd: u.cost?.usd ?? null,
         limits: u.rateLimits.map(limitOf),
       }))
     }
-    if (cfg.openOnStart) void openPane($).catch(() => undefined)
+    if (cfg.openOnStart) void openPane($, cfg).catch(() => undefined)
     await refreshStatus($, cfg)
-    return next(e)
+    const done = await next(e)
+    if (resumedWindow > 0) {
+      await readCompactWindow($, resumedWindow)
+      await refreshStatus($, cfg)
+    }
+    return done
   })
 
   on('session.end', async ($, e, next) => {
@@ -267,10 +294,10 @@ export const register: Register = (on, options) => {
       const layout: Layout | null = arg === 'compact' || arg === 'wide' || arg === 'auto' || arg === 'mini' ? arg : null
       if (!layout) return { text: 'Usage: /flightdeck layout auto|compact|wide|mini' }
       await update($, view, v => ({ ...normalize(DEFAULT_VIEW, v), layout }))
-      const opened = await openPane($)
+      const opened = await openPane($, cfg)
       return { text: opened.isPlaced ? `Flightdeck layout: ${layout}.` : `Layout set to ${layout}; the pane is not shown yet: ${opened.reason}` }
     }
-    const opened = await openPane($)
+    const opened = await openPane($, cfg)
     if (!opened.isPlaced) return { text: `Flightdeck is not shown yet: ${opened.reason}` }
     return { text: 'Flightdeck opened. Focus it with ctrl+x tab; 1-6 expand cards, f/s/o open the gate rows.' }
   })
@@ -292,6 +319,8 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
+    // A subagent's turn (its spawn, or a resume by SendMessage) is its card's, not the main turn's.
+    if (e.agentId !== undefined) return next(e)
     const [now, cost] = await Promise.all([$.clock.now(), costNow($)])
     await update($, turn, () => ({ ...DEFAULT_TURN, startedAt: now, costAtStart: cost }))
     await update($, main, m => ({ ...normalize(DEFAULT_MAIN, m), isRunning: true }))
@@ -312,10 +341,13 @@ export const register: Register = (on, options) => {
   on('turn.step', async function* ($, e, next) {
     // The main loop's model is known when its request starts; a long first request shouldn't read "—".
     if (!e.agentId) {
+      let isNewModel = false
       await update($, main, m => {
         const x = normalize(DEFAULT_MAIN, m)
+        isNewModel = x.model !== '' && x.model !== e.model
         return { ...x, model: e.model, effort: String(e.effort ?? x.effort), steps: x.steps + 1 }
       })
+      if (isNewModel) await update($, usage, x => forgetCompactRead(normalize(DEFAULT_USAGE, x)))
       // Time the response as it passes: the first piece that is not the engine's envelope, then the
       // stop chunk. Two clock reads in the stream and nothing stored until it has ended.
       const sentAt = await $.clock.now()
@@ -332,8 +364,27 @@ export const register: Register = (on, options) => {
       if (speed) await update($, main, m => ({ ...normalize(DEFAULT_MAIN, m), speed }))
       return result
     }
-    const result = yield* next(e)
     const id = e.agentId
+    // A step from an agent whose card finished means it was resumed (SendMessage): it runs again.
+    const before = (await getCards($)).find(c => c.id === id)
+    if (before && before.status !== 'running') {
+      // Flipped in the write: a resume its agent.spawn already logged is not logged again.
+      let isResumed = false
+      await update($, agents, list =>
+        listOf<unknown>(list)
+          .map(normalizeCard)
+          .map(c => {
+            if (c.id !== id || c.status === 'running') return c
+            isResumed = true
+            return resumeCard(c)
+          }),
+      )
+      if (isResumed) {
+        await say($, await whoIs($, id), 'resumed', 'info', id)
+        await refreshStatus($, cfg)
+      }
+    }
+    const result = yield* next(e)
     const [cards, a] = await Promise.all([getCards($), getArchitect($)])
     if (cards.some(c => c.id === id)) {
       const step = { model: e.model, usage: result.usage, stopReason: result.stopReason }
@@ -347,16 +398,28 @@ export const register: Register = (on, options) => {
   })
 
   on('session.measure', async ($, e, next) => {
-    await update($, usage, x => ({
-      ...normalize(DEFAULT_USAGE, x),
-      pct: e.context.percent ?? null,
-      tokens: e.context.tokens ?? null,
-      window: e.context.window,
-      costUsd: e.cost?.usd ?? null,
-      limits: e.rateLimits.map(limitOf),
-    }))
+    // The compaction window is read once per model window, not on every measurement (a breakdown
+    // estimates every category each time): claimed here, in the same write, so no two reads overlap.
+    let isStale = false
+    await update($, usage, x => {
+      const claim = claimCompactRead(normalize(DEFAULT_USAGE, x), e.context.window)
+      isStale = claim.isClaimed
+      return {
+        ...claim.usage,
+        pct: e.context.percent ?? null,
+        tokens: e.context.tokens ?? null,
+        window: e.context.window,
+        costUsd: e.cost?.usd ?? null,
+        limits: e.rateLimits.map(limitOf),
+      }
+    })
     if (e.changed.includes('context')) await refreshStatus($, cfg)
-    return next(e)
+    const done = await next(e)
+    if (isStale) {
+      await readCompactWindow($, e.context.window)
+      await refreshStatus($, cfg)
+    }
+    return done
   })
 
   on('session.compact', async ($, e, next) => {
@@ -487,9 +550,18 @@ export const register: Register = (on, options) => {
       description: e.description,
       spawnedAt: await $.clock.now(),
     }
-    await update($, agents, list => [...listOf<unknown>(list).map(normalizeCard), card].slice(-24))
+    // Decided in the write: a resume whose first step already put its card back to running is not logged again.
+    let isNew = true
+    let isResumed = false
+    await update($, agents, list => {
+      const cards = listOf<unknown>(list).map(normalizeCard)
+      const known = cards.find(c => c.id === id)
+      isNew = known === undefined
+      isResumed = known !== undefined && known.status !== 'running'
+      return addCard(cards, card)
+    })
     await update($, loops, l => listOf<Loop>(l).filter(x => x.id !== id))
-    await say($, shorten(cardTitle(card), 12), `spawned · ${card.type}`, 'info', id)
+    if (isNew || isResumed) await say($, shorten(cardTitle(card), 12), isNew ? `spawned · ${card.type}` : 'resumed', 'info', id)
     await refreshStatus($, cfg)
     return started
   })
@@ -523,8 +595,8 @@ export const register: Register = (on, options) => {
           .map(normalizeCard)
           .map(c => (c.id === id ? { ...c, status, endedAt: now, answer: shorten(e.answer, 400) } : c)),
       )
-      const card = cards.find(c => c.id === id)
-      const took = card ? fmtDuration(now - card.spawnedAt) : ''
+      // This run's own length: a resumed agent's card clock also spans the idle time between runs.
+      const took = fmtDuration(e.durationMs)
       await say($, await whoIs($, id), status === 'done' ? `done · ${took}` : status, status === 'done' ? 'done' : 'error', id)
     } else {
       await update($, loops, l => listOf<Loop>(l).map(x => (x.id === id ? { ...x, isDone: true, lastAt: now } : x)))
@@ -535,10 +607,25 @@ export const register: Register = (on, options) => {
 
   // ---------------------------------------------------------------- drawing
 
+  // After a surface module faults on a surface, this load draws it there as plain text; the other
+  // module, and other surfaces, keep theirs. Keyed by faultKey: `desktop:rail.tsx`.
+  const faulted = new Set<string>()
+  on('ui.fault', async ($, e, next) => {
+    const key = faultKey(e.surface, e.module)
+    if (e.requestId === PANE && !faulted.has(key)) {
+      faulted.add(key)
+      $.ui.log(`flightdeck: ${e.module} faulted on ${e.surface} (${e.phase}: ${e.reason}); drawing it without animation`)
+      $.ui.invalidate('ui.render')
+    }
+    return next(e)
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const els = $.ui.resolve(e)
     const { Box, Text, Button } = els
     const hasClient = 'Client' in els
+    const hasRail = hasClient && !faulted.has(faultKey(e.surface, 'rail.tsx'))
+    const hasClock = hasClient && !faulted.has(faultKey(e.surface, 'elapsed.tsx'))
     const [m, u, a, g, cards, lp, lines, t, r, v, now] = await Promise.all([
       getMain($),
       getUsage($),
@@ -561,7 +648,7 @@ export const register: Register = (on, options) => {
     const advising = isAdvising(a)
     const running = cards.filter(c => c.status === 'running')
     const showArchitect = a.consults.length > 0 || a.ids.length > 0
-    const motion = cfg.motion && hasClient
+    const motion = cfg.motion && hasRail
     // A panel with nothing to show yet takes no room: most sessions never spawn an agent.
     const isEmpty: Record<Panel, boolean> = {
       main: false,
@@ -593,15 +680,28 @@ export const register: Register = (on, options) => {
     const clock = (key: string, since: number, endAt: number | null, color: string) =>
       since <= 0 ? (
         <Text color={color}>—</Text>
-      ) : hasClient ? (
+      ) : hasClock ? (
         <els.Client key={key} module="./elapsed.tsx" props={{ since, now, endAt, color }} />
       ) : (
         <Text color={color}>{fmtTimer((endAt ?? now) - since)}</Text>
       )
 
+    const isTerminal = e.surface === 'terminal'
+    // A row of marks (gate checks, loop dots), sized by `marksIn`. Should a surface draw them wider
+    // still, the row is cut at its box rather than running past it.
+    const markRow = (marks: RenderChildren) => (
+      <Box overflow="hidden">
+        <Text wrap="truncate-start">{marks}</Text>
+      </Box>
+    )
+    // A terminal's border row stands apart from the text above it; a graphical surface draws the
+    // border flush against it, so the legend keeps one row of air there.
+    const legendGap = isTerminal ? 0 : 1
+
     // ---- main
     const effortN = { low: 1, medium: 2, high: 3, xhigh: 4, max: 4 }[m.effort] ?? 0
-    const ctxGauge = u.pct !== null ? gauge(u.pct, 10) : null
+    const ctxFill = contextFill(u)
+    const ctxGauge = ctxFill.pct !== null ? gauge(ctxFill.pct, 10) : null
     const mainPanel = (w: number) => (
       <Box flexDirection="column" borderStyle="round" borderColor={C.main} paddingX={1} width={w}>
         <Box justifyContent="space-between">
@@ -622,10 +722,10 @@ export const register: Register = (on, options) => {
         {ctxGauge ? (
           <Text wrap="truncate">
             <Text dimColor>ctx </Text>
-            <Text color={u.pct !== null && u.pct >= 80 ? C.warn : C.main}>{ctxGauge.on}</Text>
+            <Text color={ctxFill.pct !== null && ctxFill.pct >= 80 ? C.warn : C.main}>{ctxGauge.on}</Text>
             <Text color={C.faint}>{ctxGauge.off}</Text>
-            <Text bold>{` ${Math.round(u.pct ?? 0)}%`}</Text>
-            {u.tokens !== null ? <Text dimColor>{` ${kTokens(u.tokens)}/${kTokens(u.window)}`}</Text> : null}
+            <Text bold>{` ${Math.round(ctxFill.pct ?? 0)}%`}</Text>
+            {u.tokens !== null ? <Text dimColor>{` ${kTokens(u.tokens)}/${kTokens(ctxFill.window)}`}</Text> : null}
             {u.compactions > 0 ? <Text color={C.amber}>{`  ⟲${u.compactions}`}</Text> : null}
           </Text>
         ) : null}
@@ -655,6 +755,7 @@ export const register: Register = (on, options) => {
     // ---- architect
     const lastConsult = a.consults[a.consults.length - 1]
     const architectPanel = (w: number) => {
+      // Both ends are anchors (the first consult, now): should it run past its box, it asks to lose the middle.
       const tl = consultTimeline(a, now, Math.max(8, w - 4))
       return (
         <Box flexDirection="column" borderStyle="round" borderColor={C.arch} paddingX={1} width={w}>
@@ -669,7 +770,9 @@ export const register: Register = (on, options) => {
               </Text>
             </Text>
           </Box>
-          <Text color={C.arch}>{tl}</Text>
+          <Text color={C.arch} wrap="truncate-middle">
+            {tl}
+          </Text>
           {lastConsult ? (
             <Text dimColor wrap="truncate">
               {advising
@@ -705,8 +808,13 @@ export const register: Register = (on, options) => {
     const s = gateSummary(g)
     const verdictColor = (c: Check) =>
       c.verdict === 'rule' ? C.gate : c.verdict === 'cleared' ? C.cleared : c.verdict === 'ask' ? C.amber : C.warn
+    const checkMark = (c: Check) => (
+      <Text color={verdictColor(c)} dimColor={c.inSubagent}>
+        {c.verdict === 'deny' ? '✗' : '■'}
+      </Text>
+    )
     const gatePanel = (w: number) => {
-      const strip = g.recent.slice(-Math.max(8, w - 4))
+      const strip = g.recent.slice(-Math.max(8, marksIn(w - 4, isTerminal)))
       const open = v.gateOpen
       return (
         <Box flexDirection="column" borderStyle="round" borderColor={C.gate} paddingX={1} width={w}>
@@ -716,14 +824,7 @@ export const register: Register = (on, options) => {
             </Text>
             <Text dimColor>{`${s.total} checks`}</Text>
           </Box>
-          <Box>
-            {strip.length === 0 ? <Text color={C.faint}>no checks yet</Text> : null}
-            {strip.map(c => (
-              <Text color={verdictColor(c)} dimColor={c.inSubagent}>
-                {c.verdict === 'deny' ? '✗' : '■'}
-              </Text>
-            ))}
-          </Box>
+          {strip.length === 0 ? <Text color={C.faint}>no checks yet</Text> : markRow(strip.map(checkMark))}
           <Text wrap="truncate">
             <Text color={C.gate}>■</Text>
             <Text dimColor>{` ${s.rule} allowed  `}</Text>
@@ -887,14 +988,16 @@ export const register: Register = (on, options) => {
     const loopsPanel = (w: number) => {
       if (lp.length === 0) return null
       const active = lp.filter(l => isLoopActive(l, now)).length
-      const dots = lp.slice(-Math.max(4, w - 38))
+      const dots = lp.slice(-Math.max(4, marksIn(w - 38, isTerminal)))
       return (
         <Box width={w}>
           <Text bold>other loops </Text>
           <Text dimColor>{`${lp.length} seen · ${active} active  `}</Text>
-          {dots.map(l => (
-            <Text color={isLoopActive(l, now) ? C.agent : l.isDone ? C.dim : C.faint}>{isLoopActive(l, now) ? '●' : l.isDone ? '✓' : '○'}</Text>
-          ))}
+          {markRow(
+            dots.map(l => (
+              <Text color={isLoopActive(l, now) ? C.agent : l.isDone ? C.dim : C.faint}>{isLoopActive(l, now) ? '●' : l.isDone ? '✓' : '○'}</Text>
+            )),
+          )}
         </Box>
       )
     }
@@ -925,8 +1028,8 @@ export const register: Register = (on, options) => {
     }
 
     // ---- log: whatever rows the other panels leave, 4 to 8
-    // The main box's speed line and the gap above the log are a row each.
-    const used = 2 + 5 + (m.speed ? 1 : 0) + 1 + (showArchitect ? 6 : 0) + 6 + (v.gateOpen ? 5 : 0) + (cards.length > cfg.maxCards ? 3 + Math.min(6, cards.length) : 8) + (expandedCard ? 8 : 0) + (lp.length ? 1 : 0) + 3
+    // The main box's speed line, the legend's gap and the gap above the log are a row each.
+    const used = 2 + legendGap + 5 + (m.speed ? 1 : 0) + 1 + (showArchitect ? 6 : 0) + 6 + (v.gateOpen ? 5 : 0) + (cards.length > cfg.maxCards ? 3 + Math.min(6, cards.length) : 8) + (expandedCard ? 8 : 0) + (lp.length ? 1 : 0) + 3
     const bodyRows = e.props.scroll?.bodyRows ?? e.viewport?.rows ?? 40
     const nLog = logRows(bodyRows, used)
     const shownLines = (viewed ? lines.filter(l => l.agentId === viewed) : lines).slice(-nLog)
@@ -1025,8 +1128,8 @@ export const register: Register = (on, options) => {
     if (isMini) {
       const live = [...cards.filter(c => c.status === 'running'), ...cards.filter(c => c.status !== 'running').reverse()].slice(0, 3)
       const counts = ` ${s.rule} allowed · ${s.cleared} ${decider}${s.ask > 0 ? ` · ${s.ask} pending` : ''} · ${s.deny} denied`
-      const strip = g.recent.slice(-Math.max(4, W - cfg.gateLabel.length - 1 - counts.length))
-      const mg = u.pct !== null ? gauge(u.pct, 6) : null
+      const strip = g.recent.slice(-Math.max(4, marksIn(W - cfg.gateLabel.length - 1 - counts.length, isTerminal)))
+      const mg = ctxFill.pct !== null ? gauge(ctxFill.pct, 6) : null
       return (
         <Box flexDirection="column" width={W}>
           <Text wrap="truncate">
@@ -1035,9 +1138,9 @@ export const register: Register = (on, options) => {
             </Text>
             <Text color={m.isRunning ? C.main : C.dim}>{m.isRunning ? ' ● working' : ' ○ idle'}</Text>
             {mg ? <Text dimColor> · ctx </Text> : null}
-            {mg ? <Text color={(u.pct ?? 0) >= 80 ? C.warn : C.main}>{mg.on}</Text> : null}
+            {mg ? <Text color={(ctxFill.pct ?? 0) >= 80 ? C.warn : C.main}>{mg.on}</Text> : null}
             {mg ? <Text color={C.faint}>{mg.off}</Text> : null}
-            {mg ? <Text>{` ${Math.round(u.pct ?? 0)}%`}</Text> : null}
+            {mg ? <Text>{` ${Math.round(ctxFill.pct ?? 0)}%`}</Text> : null}
             {u.compactions > 0 ? <Text color={C.amber}>{` ⟲${u.compactions}`}</Text> : null}
             {u.costUsd !== null ? <Text dimColor>{` · ${fmtUsd(u.costUsd)}`}</Text> : null}
             {showArchitect ? <Text color={C.arch}>{` · ${cfg.architectLabel.toLowerCase()} ${advising ? 'advising' : a.consults.length}`}</Text> : null}
@@ -1045,11 +1148,7 @@ export const register: Register = (on, options) => {
           {strip.length > 0 ? (
             <Box>
               <Text dimColor>{`${cfg.gateLabel.toLowerCase()} `}</Text>
-              {strip.map(c => (
-                <Text color={verdictColor(c)} dimColor={c.inSubagent}>
-                  {c.verdict === 'deny' ? '✗' : '■'}
-                </Text>
-              ))}
+              {markRow(strip.map(checkMark))}
               <Text color={s.deny > 0 ? C.warn : s.ask > 0 ? C.amber : C.dim} wrap="truncate">
                 {counts}
               </Text>
@@ -1113,7 +1212,7 @@ export const register: Register = (on, options) => {
             {showArchitect ? <Text>{advising ? ' ADVISING' : ' ON CALL'}</Text> : null}
           </Text>
         </Box>
-        <Box justifyContent="center" columnGap={2}>
+        <Box key="legend" justifyContent="center" columnGap={2} marginBottom={legendGap}>
           {legend.map(l => (
             <Text>
               <Text color={l.color}>■</Text>
@@ -1123,6 +1222,15 @@ export const register: Register = (on, options) => {
         </Box>
         {body}
         {svgLanes}
+      </Box>
+    )
+  }).catch(($, e, next) => {
+    // Without this a failed draw leaves the engine's empty pane.
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column" width={Math.max(20, e.props.bodyColumns)}>
+        <Text bold>FLIGHTDECK</Text>
+        <Text color={C.warn} wrap="wrap">{`draw failed (${next.error.kind}): ${next.error.message ?? 'no message'}`}</Text>
       </Box>
     )
   })

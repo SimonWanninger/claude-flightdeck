@@ -20,6 +20,13 @@ export type Usage = {
   pct: number | null
   tokens: number | null
   window: number
+  /** The compaction window (`autoCompactWindow`, or the host's own) the host measures context against, when auto-compaction
+   *  is on and the window is smaller than the model's; null when none is set or none could be read. */
+  compactWindow: number | null
+  /** The model window `compactWindow` was read for, so a model switch reads it again; 0 = not read yet. */
+  compactFor: number
+  /** Reads for this model window that came back with no breakdown or failed; it stops asking at 3. */
+  compactMisses: number
   costUsd: number | null
   /** `resetsAt`: when the window resets, in ms since the epoch; null when the API gave no time,
    *  absent in state saved before it was kept. */
