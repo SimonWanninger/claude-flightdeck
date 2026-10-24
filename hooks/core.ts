@@ -545,6 +545,24 @@ export const fitLegend = <T extends { label: string }>(items: T[], width: number
   return out
 }
 
+/** The cells a string takes in a terminal: one per character. */
+export const cellWidth = (s: string) => [...s].length
+
+/**
+ * How many pieces of a line fit in `room` cells, in order from the start: each piece is `lead` extra cells
+ * then `width`, and pieces sit `gap` cells apart. The rest are left out, as the legend's items are.
+ */
+export const piecesThatFit = (pieces: readonly { width: number; lead?: number }[], room: number, gap: number) => {
+  let used = 0
+  for (let i = 0; i < pieces.length; i += 1) {
+    const p = pieces[i]!
+    const next = used + (i > 0 ? gap : 0) + (p.lead ?? 0) + p.width
+    if (next > room) return i
+    used = next
+  }
+  return pieces.length
+}
+
 /**
  * How many marks (■ ✗ ● ○ ✓) a row of `cells` columns holds. A terminal draws each mark in one
  * cell; a graphical surface draws them wider (■ measured about 1.4 cells on the desktop app), so
