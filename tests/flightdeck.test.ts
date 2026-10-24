@@ -5,10 +5,13 @@ import {
   DEFAULT_ARCHITECT,
   DEFAULT_GATE,
   DEFAULT_TURN,
+  DEFAULT_USAGE,
   addCard,
   afterCall,
   applyStep,
+  compactWindowOf,
   consultTimeline,
+  contextFill,
   describeInput,
   endConsult,
   fitLegend,
@@ -570,4 +573,137 @@ test('a draw that fails says why instead of leaving the pane empty', async ($, o
     expect(await ui.find({ text: /^draw failed \(throw\)/ })).toBeDefined()
     await ui.unmount()
   }
+})
+
+test('the context gauge measures against a compaction window set below the model window', () => {
+  const u = { ...DEFAULT_USAGE, tokens: 200_000, window: 1_000_000, compactWindow: 400_000 }
+  // From the real reading, not the model's percentage: 200k of 400k.
+  expect(contextFill(u)).toEqual({ pct: 50, window: 400_000 })
+  expect(contextFill({ ...u, tokens: 100_000 })).toEqual({ pct: 25, window: 400_000 })
+  // None set, or not below the model's window: the model's window.
+  expect(contextFill({ ...u, compactWindow: null })).toEqual({ pct: 20, window: 1_000_000 })
+  expect(contextFill({ ...u, compactWindow: 1_000_000 })).toEqual({ pct: 20, window: 1_000_000 })
+  expect(contextFill({ ...u, compactWindow: 1_500_000 })).toEqual({ pct: 20, window: 1_000_000 })
+  expect(contextFill({ ...u, compactWindow: 0 })).toEqual({ pct: 20, window: 1_000_000 })
+  // No reading yet, no gauge; and none from a window not yet known.
+  expect(contextFill({ ...u, tokens: null })).toEqual({ pct: null, window: 400_000 })
+  expect(contextFill(DEFAULT_USAGE)).toEqual({ pct: null, window: 0 })
+  expect(contextFill({ ...DEFAULT_USAGE, tokens: 5 }).pct).toBeNull()
+})
+
+test('a breakdown names a compaction window only when auto-compaction is on and it is below the model window', () => {
+  const on = { rawMaxTokens: 400_000, isAutoCompactEnabled: true }
+  expect(compactWindowOf(on, 1_000_000)).toBe(400_000)
+  expect(compactWindowOf({ ...on, isAutoCompactEnabled: false }, 1_000_000)).toBeNull()
+  expect(compactWindowOf({ ...on, rawMaxTokens: 1_000_000 }, 1_000_000)).toBeNull() // the model's own limit
+  expect(compactWindowOf(on, 200_000)).toBeNull() // a model switch to a smaller window
+  expect(compactWindowOf({ ...on, rawMaxTokens: 0 }, 1_000_000)).toBeNull()
+  expect(compactWindowOf(undefined, 1_000_000)).toBeNull() // no breakdown: unknown
+  expect(compactWindowOf(null, 1_000_000)).toBeNull()
+})
+
+/** A session whose `session.usage` answers as a host does: the breakdown only to a call that asks for one. */
+const compactHost = (on: On, o: { window: () => number; compact: number | null; isEnabled?: boolean; tokens?: number }) => {
+  const asked: (string | undefined)[] = []
+  on('session.usage', (_$, e) => {
+    asked.push(e.breakdown)
+    const window = o.window()
+    const breakdown =
+      e.breakdown && o.compact !== null
+        ? { rawMaxTokens: o.compact, isAutoCompactEnabled: o.isEnabled ?? true, totalTokens: 123, percentage: 99 }
+        : undefined
+    return { value: { startedAt: 0, rateLimits: [], context: { window, ...(o.tokens !== undefined ? { tokens: o.tokens } : {}), ...(breakdown ? { breakdown: breakdown as never } : {}) } } }
+  })
+  return asked
+}
+
+test('the gauge, status and inline summary measure against the compaction window, read once per model window', async ($, on) => {
+  mock.clock(on)
+  let status: string | undefined
+  on('ui.status', (_$, e) => {
+    status = e.text
+    return { value: undefined }
+  })
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  let window = 1_000_000
+  const asked = compactHost(on, { window: () => window, compact: 400_000 })
+  const measure = (tokens: number) =>
+    $.session.measure({ context: { window, tokens, percent: tokens / (window / 100) }, rateLimits: [], changed: ['context'] })
+  await measure(100_000)
+  await measure(150_000)
+  await measure(200_000)
+  // Three measurements, one summary breakdown: never `full`, which would send token-count requests.
+  expect(asked.filter(Boolean)).toEqual(['summary'])
+  expect(status).toBe('ctx 50%') // not the host's 20% of a million
+  for (const cols of [40, 64, 120]) {
+    const ui = await $.ui.mount({ ...pane(cols), surface: 'terminal' })
+    expect(await ui.find({ text: /200k\/400k/ })).toBeDefined()
+    expect(await ui.find({ text: / 50%/ })).toBeDefined()
+    expect(await ui.find({ text: /1\.0M/ })).toBeUndefined()
+    await ui.unmount()
+    const mini = await $.ui.mount({ ...pane(cols), props: { ...pane(cols).props, placement: 'inline' as const }, surface: 'terminal' })
+    expect(await mini.find({ text: / 50%/ })).toBeDefined()
+    await mini.unmount()
+  }
+  // Past 80% of the compaction window the gauge warns, though the model's window has room.
+  await measure(340_000)
+  const warn = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+  expect((await warn.find({ type: 'Text', text: /^▰+$/ }))?.props.color).toBe('error')
+  expect(await warn.find({ text: / 85%/ })).toBeDefined()
+  await warn.unmount()
+  // A model with a smaller window: read again, and a compaction window above it no longer counts.
+  window = 200_000
+  await measure(100_000)
+  expect(asked.filter(Boolean)).toEqual(['summary', 'summary'])
+  const small = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+  expect(await small.find({ text: /100k\/200k/ })).toBeDefined()
+  await small.unmount()
+})
+
+const keepsModelWindow = (name: string, host: { compact: number | null; isEnabled?: boolean }) =>
+  test(name, async ($, on) => {
+    mock.clock(on)
+    on('ui.status', () => ({ value: undefined }))
+    on('session.measure', (_$, e) => ({ changed: e.changed }))
+    const asked = compactHost(on, { window: () => 1_000_000, ...host })
+    for (const tokens of [100_000, 200_000, 300_000]) {
+      await $.session.measure({ context: { window: 1_000_000, tokens, percent: tokens / 10_000 }, rateLimits: [], changed: ['context'] })
+    }
+    // Asked on the first measurement and not again, though it had nothing to report.
+    expect(asked.filter(Boolean).length).toBe(1)
+    for (const cols of [40, 64, 120]) {
+      const ui = await $.ui.mount({ ...pane(cols), surface: 'terminal' })
+      expect(await ui.find({ text: /300k\/1\.0M/ })).toBeDefined()
+      expect(await ui.find({ text: / 30%/ })).toBeDefined()
+      await ui.unmount()
+    }
+  })
+
+keepsModelWindow('a host that gives no breakdown keeps the model window and is asked only once', { compact: null })
+keepsModelWindow('with auto-compaction off the gauge keeps the model window', { compact: 400_000, isEnabled: false })
+
+test('a resumed session reads its compaction window at start, and /clear leaves the reading alone', async ($, on) => {
+  mock.clock(on)
+  on('ui.status', () => ({ value: undefined }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  on('command.register', () => ({ value: { command: 'flightdeck' } }))
+  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  // Resumed with 200k already in context.
+  const asked = compactHost(on, { window: () => 1_000_000, compact: 400_000, tokens: 200_000 })
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  expect(asked).toEqual([undefined, 'summary'])
+  const resumed = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+  expect(await resumed.find({ text: /200k\/400k/ })).toBeDefined()
+  expect(await resumed.find({ text: / 50%/ })).toBeDefined()
+  await resumed.unmount()
+  // The gauge waits for the next measurement after a /clear; the compaction window is not asked again.
+  await $.session.end({ reason: 'clear', sessionId: 's' } as never)
+  await $.session.measure({ context: { window: 1_000_000, tokens: 100_000, percent: 10 }, rateLimits: [], changed: ['context'] })
+  expect(asked).toEqual([undefined, 'summary'])
+  const cleared = await $.ui.mount({ ...pane(64), surface: 'terminal' })
+  expect(await cleared.find({ text: /100k\/400k/ })).toBeDefined()
+  expect(await cleared.find({ text: / 25%/ })).toBeDefined()
+  await cleared.unmount()
 })

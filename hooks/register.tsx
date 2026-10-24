@@ -17,6 +17,8 @@ import {
   applyStep,
   bucketOf,
   cardTitle,
+  compactWindowOf,
+  contextFill,
   titleLines,
   consultTimeline,
   describeInput,
@@ -139,8 +141,9 @@ async function refreshStatus($: EngineInterface, cfg: Config) {
   const [u, a, g, cards] = await Promise.all([getUsage($), getArchitect($), getGate($), getCards($)])
   const running = cards.filter(c => c.status === 'running').length
   const s = gateSummary(g)
+  const ctxFill = contextFill(u)
   const parts = [
-    u.pct !== null ? `ctx ${Math.round(u.pct)}%` : null,
+    ctxFill.pct !== null ? `ctx ${Math.round(ctxFill.pct)}%` : null,
     cards.length > 0 ? `agents ${running}/${cards.length}` : null,
     a.consults.length > 0 || a.ids.length > 0 ? `${cfg.architectLabel.toLowerCase()} ${isAdvising(a) ? 'advising' : a.consults.length}` : null,
     s.deny > 0 ? `denied ${s.deny}` : null,
@@ -204,6 +207,20 @@ async function resetAll($: EngineInterface) {
   await update($, usage, x => ({ ...normalize(DEFAULT_USAGE, x), pct: null, tokens: null }))
 }
 
+/**
+ * Stores the compaction window for the model window `window`. A `summary` breakdown estimates locally
+ * and sends no request; where the host gives none, the gauge stays on the model's window. Dropped when
+ * the model changed again while it was read.
+ */
+async function readCompactWindow($: EngineInterface, window: number) {
+  const r = await $.session.usage({ breakdown: 'summary' }).catch(() => null)
+  const compactWindow = compactWindowOf(r?.context.breakdown, window)
+  await update($, usage, x => {
+    const u = normalize(DEFAULT_USAGE, x)
+    return u.compactFor === window ? { ...u, compactWindow } : u
+  })
+}
+
 /** The session's cost read fresh, not from the last measurement: the receipt subtracts two of these. */
 async function costNow($: EngineInterface): Promise<number | null> {
   const u = await $.session.usage().catch(() => null)
@@ -231,19 +248,28 @@ export const register: Register = (on, options) => {
     await migrate($)
     // A host without usage (headless, an SDK host, a session not yet bound) just starts without it.
     const u = await $.session.usage().catch(() => null)
+    // A resumed session has a fill to draw already: its compaction window is read now, not at its first
+    // measurement. Any other start forgets the last reading (the setting may have changed) for that one to read.
+    const resumedWindow = u && u.context.tokens !== undefined && u.context.window > 0 ? u.context.window : 0
     if (u) {
       await update($, usage, x => ({
         ...normalize(DEFAULT_USAGE, x),
         pct: u.context.percent ?? null,
         tokens: u.context.tokens ?? null,
         window: u.context.window,
+        compactFor: resumedWindow,
         costUsd: u.cost?.usd ?? null,
         limits: u.rateLimits.map(limitOf),
       }))
     }
     if (cfg.openOnStart) void openPane($).catch(() => undefined)
     await refreshStatus($, cfg)
-    return next(e)
+    const done = await next(e)
+    if (resumedWindow > 0) {
+      await readCompactWindow($, resumedWindow)
+      await refreshStatus($, cfg)
+    }
+    return done
   })
 
   on('session.end', async ($, e, next) => {
@@ -349,16 +375,29 @@ export const register: Register = (on, options) => {
   })
 
   on('session.measure', async ($, e, next) => {
-    await update($, usage, x => ({
-      ...normalize(DEFAULT_USAGE, x),
-      pct: e.context.percent ?? null,
-      tokens: e.context.tokens ?? null,
-      window: e.context.window,
-      costUsd: e.cost?.usd ?? null,
-      limits: e.rateLimits.map(limitOf),
-    }))
+    // The compaction window is read once per model window, not on every measurement (a breakdown
+    // estimates every category each time): claimed here, in the same write, so no two reads overlap.
+    let isStale = false
+    await update($, usage, x => {
+      const u = normalize(DEFAULT_USAGE, x)
+      isStale = e.context.window > 0 && u.compactFor !== e.context.window
+      return {
+        ...u,
+        pct: e.context.percent ?? null,
+        tokens: e.context.tokens ?? null,
+        window: e.context.window,
+        compactFor: isStale ? e.context.window : u.compactFor,
+        costUsd: e.cost?.usd ?? null,
+        limits: e.rateLimits.map(limitOf),
+      }
+    })
     if (e.changed.includes('context')) await refreshStatus($, cfg)
-    return next(e)
+    const done = await next(e)
+    if (isStale) {
+      await readCompactWindow($, e.context.window)
+      await refreshStatus($, cfg)
+    }
+    return done
   })
 
   on('session.compact', async ($, e, next) => {
@@ -626,7 +665,8 @@ export const register: Register = (on, options) => {
 
     // ---- main
     const effortN = { low: 1, medium: 2, high: 3, xhigh: 4, max: 4 }[m.effort] ?? 0
-    const ctxGauge = u.pct !== null ? gauge(u.pct, 10) : null
+    const ctxFill = contextFill(u)
+    const ctxGauge = ctxFill.pct !== null ? gauge(ctxFill.pct, 10) : null
     const mainPanel = (w: number) => (
       <Box flexDirection="column" borderStyle="round" borderColor={C.main} paddingX={1} width={w}>
         <Box justifyContent="space-between">
@@ -647,10 +687,10 @@ export const register: Register = (on, options) => {
         {ctxGauge ? (
           <Text wrap="truncate">
             <Text dimColor>ctx </Text>
-            <Text color={u.pct !== null && u.pct >= 80 ? C.warn : C.main}>{ctxGauge.on}</Text>
+            <Text color={ctxFill.pct !== null && ctxFill.pct >= 80 ? C.warn : C.main}>{ctxGauge.on}</Text>
             <Text color={C.faint}>{ctxGauge.off}</Text>
-            <Text bold>{` ${Math.round(u.pct ?? 0)}%`}</Text>
-            {u.tokens !== null ? <Text dimColor>{` ${kTokens(u.tokens)}/${kTokens(u.window)}`}</Text> : null}
+            <Text bold>{` ${Math.round(ctxFill.pct ?? 0)}%`}</Text>
+            {u.tokens !== null ? <Text dimColor>{` ${kTokens(u.tokens)}/${kTokens(ctxFill.window)}`}</Text> : null}
             {u.compactions > 0 ? <Text color={C.amber}>{`  ⟲${u.compactions}`}</Text> : null}
           </Text>
         ) : null}
@@ -1054,7 +1094,7 @@ export const register: Register = (on, options) => {
       const live = [...cards.filter(c => c.status === 'running'), ...cards.filter(c => c.status !== 'running').reverse()].slice(0, 3)
       const counts = ` ${s.rule} allowed · ${s.cleared} ${decider}${s.ask > 0 ? ` · ${s.ask} pending` : ''} · ${s.deny} denied`
       const strip = g.recent.slice(-Math.max(4, marksIn(W - cfg.gateLabel.length - 1 - counts.length, isTerminal)))
-      const mg = u.pct !== null ? gauge(u.pct, 6) : null
+      const mg = ctxFill.pct !== null ? gauge(ctxFill.pct, 6) : null
       return (
         <Box flexDirection="column" width={W}>
           <Text wrap="truncate">
@@ -1063,9 +1103,9 @@ export const register: Register = (on, options) => {
             </Text>
             <Text color={m.isRunning ? C.main : C.dim}>{m.isRunning ? ' ● working' : ' ○ idle'}</Text>
             {mg ? <Text dimColor> · ctx </Text> : null}
-            {mg ? <Text color={(u.pct ?? 0) >= 80 ? C.warn : C.main}>{mg.on}</Text> : null}
+            {mg ? <Text color={(ctxFill.pct ?? 0) >= 80 ? C.warn : C.main}>{mg.on}</Text> : null}
             {mg ? <Text color={C.faint}>{mg.off}</Text> : null}
-            {mg ? <Text>{` ${Math.round(u.pct ?? 0)}%`}</Text> : null}
+            {mg ? <Text>{` ${Math.round(ctxFill.pct ?? 0)}%`}</Text> : null}
             {u.compactions > 0 ? <Text color={C.amber}>{` ⟲${u.compactions}`}</Text> : null}
             {u.costUsd !== null ? <Text dimColor>{` · ${fmtUsd(u.costUsd)}`}</Text> : null}
             {showArchitect ? <Text color={C.arch}>{` · ${cfg.architectLabel.toLowerCase()} ${advising ? 'advising' : a.consults.length}`}</Text> : null}
