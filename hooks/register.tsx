@@ -1231,7 +1231,7 @@ export const register: Register = (on, options) => {
       const strip = g.recent.slice(-Math.max(4, marksIn(W - cfg.gateLabel.length - 2 - counts.length, isTerminal)))
       const mg = ctxFill.pct !== null ? gauge(ctxFill.pct, 6) : null
       return (
-        <Box flexDirection="column" width={W}>
+        <Box flexDirection="column" width={W} backgroundColor="#000000">
           {line(
             [
               {
@@ -1313,7 +1313,7 @@ export const register: Register = (on, options) => {
     )
 
     return (
-      <Box flexDirection="column" width={W}>
+      <Box flexDirection="column" width={W} minHeight={bodyRows} backgroundColor="#000000">
         {/* Below 40 columns the frame's own title names the pane, so the header starts at the model. */}
         {line(
           [
