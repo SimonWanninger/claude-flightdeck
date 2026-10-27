@@ -195,7 +195,7 @@ async function isArchitectType($: EngineInterface, cfg: Config, type: string) {
 
 async function openPane($: EngineInterface, cfg: Config) {
   // columns apply when docked beside the transcript, rows when seated inline above the prompt.
-  return $.ui.open({ id: PANE, title: TITLE, columns: cfg.paneColumns, rows: 8 })
+  return $.ui.open({ id: PANE, title: TITLE, columns: cfg.paneColumns, rows: 8, backgroundColor: '#000000' })
 }
 
 async function resetAll($: EngineInterface) {
